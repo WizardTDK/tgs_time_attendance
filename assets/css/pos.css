@@ -1,0 +1,135 @@
+/* Chấm công trên POS — mọi lớp đều có tiền tố tgs-cc- để không đụng CSS của màn bán hàng */
+
+/* Góc trái dưới màn POS đã có 2 nút tròn "tải lại" + "đổi khổ màn" (rộng ~95px), phía trên là các nút
+   khách hàng → đặt nút chấm công CÙNG HÀNG đáy, ngay bên phải 2 nút tròn (đã đo trên màn 1600px). */
+.tgs-cc-fab {
+    position: fixed; left: 112px; bottom: 14px; z-index: 9990;
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 32px; padding: 0 14px 0 10px; border-radius: 18px;
+    border: 1px solid #b9cdeb; background: #fff; color: #1e4fa3;
+    font: 600 13px/1 "Segoe UI", Inter, system-ui, sans-serif;
+    box-shadow: 0 4px 14px rgba(16, 24, 40, .15); cursor: pointer;
+}
+.tgs-cc-fab svg { width: 18px; height: 18px; }
+.tgs-cc-fab:hover { background: #eaf1fb; }
+.tgs-cc-fab__dot { width: 8px; height: 8px; border-radius: 50%; background: #9aa1ad; }
+.tgs-cc-fab.is-working { border-color: #157347; color: #157347; }
+.tgs-cc-fab.is-working .tgs-cc-fab__dot { background: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, .25); }
+@media print { .tgs-cc-fab, .tgs-cc-overlay { display: none !important; } }
+
+html.tgs-cc-lock, html.tgs-cc-lock body { overflow: hidden; }
+
+.tgs-cc-overlay {
+    position: fixed; inset: 0; z-index: 100000;
+    background: rgba(15, 23, 42, .55);
+    display: flex; align-items: center; justify-content: center; padding: 16px;
+    font: 14px/1.45 "Segoe UI", Inter, system-ui, sans-serif; color: #1a1f2b;
+}
+.tgs-cc-overlay[hidden] { display: none; }
+.tgs-cc-overlay *, .tgs-cc-overlay *::before, .tgs-cc-overlay *::after { box-sizing: border-box; }
+
+.tgs-cc-card {
+    width: 100%; max-width: 460px; max-height: calc(100vh - 32px); overflow: auto;
+    background: #fff; border-radius: 14px; box-shadow: 0 20px 50px rgba(0, 0, 0, .25);
+}
+.tgs-cc-head { display: flex; align-items: center; padding: 12px 16px; border-bottom: 1px solid #e5e7eb; }
+.tgs-cc-title { font-weight: 700; font-size: 16px; color: #1e4fa3; }
+.tgs-cc-x { margin-left: auto; border: 0; background: none; font-size: 26px; line-height: 1; color: #737b89; cursor: pointer; padding: 0 4px; }
+
+.tgs-cc-clock { text-align: center; padding: 14px 16px 4px; }
+.tgs-cc-clock__time { font-size: 44px; font-weight: 700; letter-spacing: 1px; font-variant-numeric: tabular-nums; color: #123566; }
+.tgs-cc-clock__time small { font-size: 22px; color: #737b89; }
+.tgs-cc-clock__date { color: #4a5361; }
+
+.tgs-cc-who { display: flex; justify-content: center; align-items: center; gap: 8px; padding: 6px 16px 10px; }
+.tgs-cc-who__name { font-weight: 700; font-size: 16px; }
+
+.tgs-cc-body { padding: 0 16px 14px; }
+.tgs-cc-sub { margin: 10px 0 6px; color: #4a5361; font-size: 13px; }
+.tgs-cc-hint { color: #737b89; font-size: 13px; margin: 6px 0 10px; }
+
+.tgs-cc-shifts { display: grid; gap: 8px; }
+.tgs-cc-shift {
+    display: grid; grid-template-columns: 1fr auto; grid-template-areas: "name go" "time go" "tags go";
+    text-align: left; gap: 2px 10px; width: 100%;
+    padding: 12px 14px; border: 1px solid #d5d8de; border-left: 6px solid var(--tgs-cc-c, #1e4fa3);
+    border-radius: 10px; background: #fff; cursor: pointer; font: inherit; color: inherit;
+}
+.tgs-cc-shift:hover { background: #f4f7fc; border-color: #b9cdeb; border-left-color: var(--tgs-cc-c, #1e4fa3); }
+.tgs-cc-shift:disabled { opacity: .6; cursor: wait; }
+.tgs-cc-shift__name { grid-area: name; font-weight: 700; font-size: 16px; }
+.tgs-cc-shift__time { grid-area: time; color: #4a5361; }
+.tgs-cc-shift__tags { grid-area: tags; display: flex; gap: 4px; flex-wrap: wrap; }
+.tgs-cc-shift__go {
+    grid-area: go; align-self: center; padding: 10px 14px; border-radius: 8px;
+    background: #157347; color: #fff; font-weight: 700; font-size: 13px; white-space: nowrap;
+}
+
+.tgs-cc-tag { font-style: normal; font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #eaf1fb; color: #1e4fa3; font-weight: 600; }
+.tgs-cc-tag--warn { background: #fdf3e3; color: #a26206; }
+
+.tgs-cc-open { border: 1px solid #b7e0c5; background: #e7f4ec; border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; }
+.tgs-cc-open__label { font-size: 12px; text-transform: uppercase; color: #157347; font-weight: 700; letter-spacing: .5px; }
+.tgs-cc-open__shift { font-size: 18px; font-weight: 700; }
+.tgs-cc-open__shift span { font-size: 14px; font-weight: 400; color: #4a5361; }
+
+.tgs-cc-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    height: 40px; padding: 0 16px; border-radius: 8px; border: 1px solid transparent;
+    font-family: inherit; font-weight: 600; font-size: 14px; line-height: 1; cursor: pointer;
+}
+.tgs-cc-btn:disabled { opacity: .6; cursor: wait; }
+.tgs-cc-btn--big { width: 100%; height: 56px; font-size: 17px; }
+.tgs-cc-btn--primary { background: #1e4fa3; color: #fff; }
+.tgs-cc-btn--out { background: #b42318; color: #fff; }
+.tgs-cc-btn--ghost { background: #fff; border-color: #d5d8de; color: #1a1f2b; }
+.tgs-cc-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+.tgs-cc-row .tgs-cc-btn { flex: 1; }
+
+.tgs-cc-alert { padding: 10px 12px; border-radius: 8px; margin: 6px 0 10px; font-size: 13px; }
+.tgs-cc-alert--bad { background: #fdeceb; color: #b42318; }
+.tgs-cc-alert--warn { background: #fdf3e3; color: #7a4a04; }
+.tgs-cc-alert--info { background: #e6f4f9; color: #0e6d92; }
+
+.tgs-cc-hist { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tgs-cc-hist th, .tgs-cc-hist td { padding: 6px 4px; border-bottom: 1px solid #eef0f3; text-align: left; }
+.tgs-cc-hist th { color: #737b89; font-weight: 600; font-size: 12px; }
+.tgs-cc-st { font-size: 11px; font-weight: 600; padding: 2px 6px; border-radius: 4px; background: #eef0f3; color: #4a5361; white-space: nowrap; }
+.tgs-cc-st--success { background: #e7f4ec; color: #157347; }
+.tgs-cc-st--warning { background: #fdf3e3; color: #a26206; }
+.tgs-cc-st--danger { background: #fdeceb; color: #b42318; }
+.tgs-cc-st--info { background: #e6f4f9; color: #0e6d92; }
+.tgs-cc-st--primary { background: #eaf1fb; color: #1e4fa3; }
+
+.tgs-cc-login label { display: block; font-size: 13px; color: #4a5361; margin-bottom: 8px; }
+.tgs-cc-login input {
+    display: block; width: 100%; height: 42px; margin-top: 4px; padding: 0 12px;
+    border: 1px solid #d0d5dd; border-radius: 8px; font: inherit; font-size: 15px;
+}
+.tgs-cc-login input:focus { outline: none; border-color: #1e4fa3; box-shadow: 0 0 0 3px rgba(30, 79, 163, .18); }
+
+.tgs-cc-done { text-align: center; padding: 10px 0 6px; }
+.tgs-cc-done__icon { width: 56px; height: 56px; margin: 0 auto 10px; border-radius: 50%; background: #157347; color: #fff; font-size: 30px; line-height: 56px; }
+.tgs-cc-done__msg { font-size: 15px; font-weight: 600; }
+
+.tgs-cc-loading { text-align: center; color: #737b89; padding: 18px 0; }
+.tgs-cc-spin { display: inline-block; width: 16px; height: 16px; border: 2px solid #b9cdeb; border-top-color: #1e4fa3; border-radius: 50%; animation: tgs-cc-spin .8s linear infinite; vertical-align: -3px; }
+@keyframes tgs-cc-spin { to { transform: rotate(360deg); } }
+
+.tgs-cc-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 10px 16px; border-top: 1px solid #e5e7eb; background: #f9fafb; border-radius: 0 0 14px 14px; }
+.tgs-cc-link { border: 0; background: none; padding: 0; color: #1e4fa3; font: inherit; font-size: 13px; cursor: pointer; text-decoration: none; }
+.tgs-cc-link:hover { text-decoration: underline; }
+
+/* Màn chấm công riêng (?tgs-cham-cong=1) */
+body.tgs-cc-standalone { margin: 0; min-height: 100vh; background: linear-gradient(180deg, #17407d 0%, #123566 100%); font-family: "Segoe UI", Inter, system-ui, sans-serif; }
+.tgs-cc-standalone__bar { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; color: #d6e2f4; font-size: 14px; }
+.tgs-cc-standalone__bar a { color: #fff; text-decoration: none; }
+.tgs-cc-overlay--standalone { background: transparent; top: 46px; }
+
+@media (max-width: 480px) {
+    .tgs-cc-overlay { padding: 0; align-items: stretch; }
+    .tgs-cc-card { max-width: none; max-height: none; border-radius: 0; }
+    .tgs-cc-overlay--standalone .tgs-cc-card { border-radius: 14px 14px 0 0; }
+    .tgs-cc-fab__text { display: none; }
+    .tgs-cc-fab { padding: 0 10px; }
+}
