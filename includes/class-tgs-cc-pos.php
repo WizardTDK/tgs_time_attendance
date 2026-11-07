@@ -9,9 +9,9 @@
  *      thoại / máy tính bảng đặt ở cửa (không cần mở màn bán hàng).
  *
  * Nhân viên chấm bằng chính TÀI KHOẢN ĐANG ĐĂNG NHẬP POS (tài khoản được cấp).
- * Máy quầy dùng chung một tài khoản → nút "Chấm công cho tài khoản khác":
- * nhập tên đăng nhập + mật khẩu của mình, hệ thống xác thực rồi chấm cho
- * đúng người đó, KHÔNG đổi phiên đăng nhập đang bán hàng.
+ * Ca lồng nhau, 2–5 người bán cùng lúc → nút "Điểm danh nhân viên khác trong ca":
+ * người đang trong ca chọn đồng nghiệp có ca đang diễn ra để chấm vào / ra hộ.
+ * Không đổi phiên đăng nhập đang bán hàng; nhật ký ghi rõ ai điểm danh hộ ai.
  */
 
 defined('ABSPATH') || exit;
@@ -19,7 +19,6 @@ defined('ABSPATH') || exit;
 class TGS_CC_POS
 {
     const NONCE = 'tgs_cc_pos';
-    const MAX_FAIL = 5;
 
     private static $on_pos = false;
 
@@ -116,35 +115,7 @@ class TGS_CC_POS
 
     /* ═══════════════════════════ AJAX ═══════════════════════════ */
 
-    private static function fail_key()
-    {
-        return 'tgs_cc_fail_' . md5(TGS_CC_Service::client_ip());
-    }
-
-    /** Xác thực tài khoản khác (máy quầy dùng chung) — có chặn dò mật khẩu */
-    private static function auth_other($login, $password)
-    {
-        if (!TGS_CC_Settings::get('allow_other_account')) {
-            return new WP_Error('off', 'Cửa hàng đã tắt chấm công bằng tài khoản khác.');
-        }
-        $fails = (int) get_transient(self::fail_key());
-        if ($fails >= self::MAX_FAIL) {
-            return new WP_Error('locked', 'Nhập sai quá nhiều lần. Thử lại sau 10 phút.');
-        }
-        $login = sanitize_user($login);
-        if ($login === '' || $password === '') {
-            return new WP_Error('empty', 'Nhập tên đăng nhập và mật khẩu.');
-        }
-        $user = wp_authenticate($login, $password);
-        if (is_wp_error($user)) {
-            set_transient(self::fail_key(), $fails + 1, 10 * MINUTE_IN_SECONDS);
-            return new WP_Error('bad', 'Sai tên đăng nhập hoặc mật khẩu.');
-        }
-        delete_transient(self::fail_key());
-        return $user;
-    }
-
-    /** Tài khoản có thuộc danh sách nhân viên chấm công của shop này không */
+    /** Tài khoản có thuộc danh sách nhân viên chấm công của shop này không + máy có trong mạng cửa hàng không */
     private static function check_employee($user_id)
     {
         if (!in_array((int) $user_id, TGS_CC_Service::employee_ids(), true)) {
@@ -169,14 +140,34 @@ class TGS_CC_POS
         }
         TGS_CC_DB::maybe_install();
 
-        $uid = get_current_user_id();
-        $other = !empty($_POST['login']);
-        if ($other) {
-            $user = self::auth_other(wp_unslash($_POST['login']), isset($_POST['password']) ? (string) wp_unslash($_POST['password']) : '');
-            if (is_wp_error($user)) {
-                wp_send_json_error(array('message' => $user->get_error_message()), 400);
+        $actor = get_current_user_id();
+
+        // Danh sách đồng nghiệp trong ca để điểm danh hộ
+        if ($op === 'team') {
+            if (!TGS_CC_Settings::ip_allowed(TGS_CC_Service::client_ip())) {
+                wp_send_json_error(array('message' => 'Máy này không nằm trong mạng của cửa hàng nên không chấm công được.'), 400);
             }
-            $uid = (int) $user->ID;
+            $can = TGS_CC_Service::team_can_act($actor);
+            if (is_wp_error($can)) {
+                wp_send_json_error(array('message' => $can->get_error_message(), 'code' => $can->get_error_code()), 400);
+            }
+            wp_send_json_success(TGS_CC_Service::team_state($actor));
+        }
+
+        // Điểm danh hộ: người đang đăng nhập (đang trong ca) chấm cho đồng nghiệp cùng ca.
+        // Server kiểm tra lại quyền + "cùng ca" ở MỌI lượt gọi, không tin danh sách trên trình duyệt.
+        $uid = $actor;
+        $proxy = !empty($_POST['target']) && (int) $_POST['target'] !== $actor;
+        if ($proxy) {
+            $target = (int) $_POST['target'];
+            $can = TGS_CC_Service::team_can_act($actor);
+            if (is_wp_error($can)) {
+                wp_send_json_error(array('message' => $can->get_error_message(), 'code' => $can->get_error_code()), 400);
+            }
+            if (!TGS_CC_Service::team_has($actor, $target)) {
+                wp_send_json_error(array('message' => TGS_CC_Service::user_name($target) . ' không có ca nào đang diễn ra cùng lúc với bạn nên không điểm danh hộ được.', 'code' => 'not_team'), 400);
+            }
+            $uid = $target;
         }
 
         $chk = self::check_employee($uid);
@@ -193,9 +184,12 @@ class TGS_CC_POS
             $r = TGS_CC_Service::punch($uid, $type, array(
                 'shift_id' => isset($_POST['shift_id']) ? (int) $_POST['shift_id'] : 0,
                 'work_date' => isset($_POST['work_date']) ? sanitize_text_field(wp_unslash($_POST['work_date'])) : '',
-            ), $other ? 'pos_khac' : 'pos');
+            ), $proxy ? 'pos_ho' : 'pos');
             if (is_wp_error($r)) {
                 wp_send_json_error(array('message' => $r->get_error_message(), 'state' => TGS_CC_Service::pos_state($uid)), 400);
+            }
+            if ($proxy) {
+                $r['message'] .= ' (cho ' . TGS_CC_Service::user_name($uid) . ', người điểm danh: ' . TGS_CC_Service::user_name($actor) . ')';
             }
             $r['state'] = TGS_CC_Service::pos_state($uid);
             wp_send_json_success($r);

@@ -196,7 +196,7 @@ class TGS_CC_Admin
             case 'schedule_bulk':
                 list($from, $to) = self::range($p, 93);
                 $r = TGS_CC_Service::schedule_bulk($users, isset($p['shift_ids']) ? $p['shift_ids'] : array(), $from, $to, isset($p['weekdays']) ? $p['weekdays'] : array(), !empty($p['replace']));
-                self::respond($r, is_wp_error($r) ? '' : 'Đã xếp ' . $r . ' lượt ca.');
+                self::respond($r, is_wp_error($r) ? '' : 'Đã xếp ' . $r . ' lượt ca.' . self::skipped_note());
 
             case 'schedule_copy_week':
                 $src = isset($p['src']) ? (string) $p['src'] : '';
@@ -205,7 +205,7 @@ class TGS_CC_Admin
                     wp_send_json_error(array('message' => 'Tuần không hợp lệ.'), 400);
                 }
                 $n = TGS_CC_Service::schedule_copy_week($src, $dst, $users, true);
-                self::respond($n, is_wp_error($n) ? '' : 'Đã chép ' . $n . ' lượt ca sang tuần mới.');
+                self::respond($n, is_wp_error($n) ? '' : 'Đã chép ' . $n . ' lượt ca sang tuần mới.' . self::skipped_note());
 
             case 'schedule_clear':
                 list($from, $to) = self::range($p, 93);
@@ -308,6 +308,12 @@ class TGS_CC_Admin
             }
         }
         return $changed ? ' Đã cập nhật quyền quản lý chấm công cho ' . $changed . ' tài khoản.' : '';
+    }
+
+    private static function skipped_note()
+    {
+        $k = (int) TGS_CC_Service::$schedule_skipped;
+        return $k ? ' Bỏ qua ' . $k . ' lượt vì chồng giờ với ca đã xếp của cùng nhân viên.' : '';
     }
 
     private static function respond($r, $message)

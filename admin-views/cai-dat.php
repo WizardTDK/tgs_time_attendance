@@ -98,7 +98,7 @@ foreach (TGS_CC_Service::site_users() as $u) {
             <div class="card-body">
                 <label class="d-block mb-2"><input type="checkbox" class="form-check-input" name="pos_button" value="1"<?php $cc_check('pos_button'); ?>> Hiện nút "Chấm công" trên màn bán hàng</label>
                 <label class="d-block mb-2"><input type="checkbox" class="form-check-input" name="require_schedule" value="1"<?php $cc_check('require_schedule'); ?>> Chỉ cho chấm vào ca <b>đã xếp lịch</b> (tắt = chấm được mọi ca đang trong giờ)</label>
-                <label class="d-block mb-2"><input type="checkbox" class="form-check-input" name="allow_other_account" value="1"<?php $cc_check('allow_other_account'); ?>> Cho chấm công bằng tài khoản khác trên máy quầy dùng chung (nhập tên đăng nhập + mật khẩu)</label>
+                <label class="d-block mb-2"><input type="checkbox" class="form-check-input" name="allow_other_account" value="1"<?php $cc_check('allow_other_account'); ?>> Cho <b>điểm danh nhân viên khác trong ca</b>: người đang trong ca chấm vào / ra hộ đồng nghiệp có ca đang diễn ra cùng lúc (ca lồng nhau, nhiều người bán cùng lúc)</label>
                 <label class="form-label mt-2">Chỉ cho chấm từ IP mạng cửa hàng (mỗi dòng một IP, tiền tố <code>113.161.12.</code> hoặc dải <code>113.161.12.0/24</code>)</label>
                 <textarea class="form-control" rows="2" name="ip_whitelist" placeholder="Để trống = không giới hạn"><?php echo esc_textarea($cc_s['ip_whitelist']); ?></textarea>
                 <div class="ds-hint mt-1">IP máy bạn đang dùng (theo cách lấy IP bên dưới): <code><?php echo esc_html(TGS_CC_Service::client_ip()); ?></code></div>

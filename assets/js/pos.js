@@ -9,8 +9,9 @@
 
     var root = null;          // overlay
     var state = null;         // dữ liệu pos_state hiện tại
-    var other = null;         // { login, password } khi chấm cho tài khoản khác
-    var view = 'loading';     // loading | state | login | done | error
+    var other = null;         // { id, name } khi điểm danh hộ đồng nghiệp trong ca
+    var team = null;          // { members, others } danh sách đồng nghiệp trong ca
+    var view = 'loading';     // loading | state | team | done | error
     var errorMsg = '';
     var doneMsg = '';
     var confirmOut = false;
@@ -30,10 +31,7 @@
         body.append('action', 'tgs_cc_pos');
         body.append('nonce', C.nonce);
         Object.keys(fields).forEach(function (k) { body.append(k, fields[k]); });
-        if (other) {
-            body.append('login', other.login);
-            body.append('password', other.password);
-        }
+        if (other && fields.op !== 'team') body.append('target', other.id);
         return fetch(C.ajaxUrl, { method: 'POST', credentials: 'same-origin', body: body })
             .then(function (r) {
                 return r.json().catch(function () { return null; }).then(function (j) { return { status: r.status, j: j }; });
@@ -80,18 +78,39 @@
             render();
         }, function (e) {
             if (other) {
-                // Sai mật khẩu → quay lại form, giữ tên đăng nhập
-                var login = other.login;
+                // Không còn điểm danh hộ được (hết ca / không cùng ca) → về danh sách đồng nghiệp
                 other = null;
-                view = 'login';
-                errorMsg = e.message;
-                render(login);
-                return;
+                return loadTeam(e.message);
             }
             view = 'error';
             errorMsg = e.message;
             render();
         });
+    }
+
+    /* ── Điểm danh nhân viên khác trong ca ───────────────────────────── */
+    function loadTeam(msg) {
+        other = null;
+        view = 'loading';
+        render();
+        return send({ op: 'team' }).then(function (d) {
+            team = d;
+            view = 'team';
+            errorMsg = msg || '';
+            render();
+        }, function (e) {
+            team = null;
+            view = 'team';
+            errorMsg = e.message;
+            render();
+        });
+    }
+
+    function pickMember(id, name) {
+        other = { id: id, name: name };
+        state = null; // không hiện nhầm trạng thái của tài khoản đang đăng nhập
+        errorMsg = '';
+        loadState();
     }
 
     function punch(type, shiftId, workDate) {
@@ -107,9 +126,8 @@
             clearTimeout(backTimer);
             backTimer = setTimeout(function () {
                 if (other) {
-                    // Chấm hộ xong: xoá ngay mật khẩu khỏi bộ nhớ, trở về tài khoản đang đăng nhập
-                    other = null;
-                    loadState();
+                    // Điểm danh hộ xong → về danh sách đồng nghiệp để điểm danh tiếp người khác
+                    loadTeam();
                 } else {
                     state = d.state;
                     view = 'state';
@@ -134,7 +152,36 @@
             + '<div class="tgs-cc-clock__date">' + days[now.getDay()] + ', ' + p(now.getDate()) + '/' + p(now.getMonth() + 1) + '/' + now.getFullYear() + '</div>';
     }
 
-    function body(prefillLogin) {
+    function teamHtml() {
+        var h = '<div class="tgs-cc-hint">Chọn đồng nghiệp đang có ca cùng lúc với bạn để chấm <b>vào / ra</b> hộ. Nhật ký ghi lại bạn là người điểm danh.</div>';
+        if (errorMsg) h += '<div class="tgs-cc-alert tgs-cc-alert--bad">' + esc(errorMsg) + '</div>';
+        if (!team) return h;
+        if (!team.members.length && !team.others.length) {
+            return h + '<div class="tgs-cc-alert tgs-cc-alert--info">Hiện không có nhân viên nào khác có ca đang diễn ra.</div>';
+        }
+        if (team.members.length) {
+            h += '<div class="tgs-cc-sub">Trong ca lúc này (' + team.members.length + ')</div><div class="tgs-cc-team">';
+            team.members.forEach(function (m) {
+                h += '<button type="button" class="tgs-cc-mate" data-act="pick" data-id="' + m.id + '" data-name="' + esc(m.name) + '">'
+                    + '<span class="tgs-cc-mate__name">' + esc(m.name) + '</span>'
+                    + '<span class="tgs-cc-st tgs-cc-st--' + esc(m.tone) + '">' + esc(m.label) + '</span>'
+                    + '<span class="tgs-cc-mate__shifts">' + esc(m.shifts.join(' · ')) + '</span>'
+                    + '<span class="tgs-cc-mate__go">' + (m.mode === 'out' ? 'Chấm ra ›' : m.mode === 'in' ? 'Chấm vào ›' : 'Xem ›') + '</span></button>';
+            });
+            h += '</div>';
+        }
+        if (team.others.length) {
+            h += '<details class="tgs-cc-others"' + (team.members.length ? '' : ' open') + '><summary>Nhân viên khác (chưa xếp lịch ca lúc này) · ' + team.others.length + '</summary><div class="tgs-cc-team">';
+            team.others.forEach(function (m) {
+                h += '<button type="button" class="tgs-cc-mate" data-act="pick" data-id="' + m.id + '" data-name="' + esc(m.name) + '">'
+                    + '<span class="tgs-cc-mate__name">' + esc(m.name) + '</span><span class="tgs-cc-mate__go">Chọn ›</span></button>';
+            });
+            h += '</div></details>';
+        }
+        return h;
+    }
+
+    function body() {
         if (view === 'loading') {
             return '<div class="tgs-cc-loading"><span class="tgs-cc-spin"></span> Đang tải…</div>';
         }
@@ -144,19 +191,9 @@
         }
         if (view === 'done') {
             return '<div class="tgs-cc-done"><div class="tgs-cc-done__icon">✓</div><div class="tgs-cc-done__msg">' + esc(doneMsg) + '</div>'
-                + (other ? '<div class="tgs-cc-hint">Đang trở về tài khoản ' + esc(C.userName) + '…</div>' : '') + '</div>';
+                + (other ? '<div class="tgs-cc-hint">Đang trở về danh sách nhân viên trong ca…</div>' : '') + '</div>';
         }
-        if (view === 'login') {
-            return '<form class="tgs-cc-login" data-form="login" autocomplete="off">'
-                + '<div class="tgs-cc-hint">Máy quầy dùng chung? Nhập tài khoản được cấp của bạn để chấm công cho chính mình. Phiên bán hàng hiện tại không bị đăng xuất.</div>'
-                + (errorMsg ? '<div class="tgs-cc-alert tgs-cc-alert--bad">' + esc(errorMsg) + '</div>' : '')
-                + '<label>Tên đăng nhập<input name="login" required autocomplete="off" autocapitalize="none" value="' + esc(prefillLogin || '') + '"></label>'
-                + '<label>Mật khẩu<input name="password" type="password" required autocomplete="new-password"></label>'
-                + '<div class="tgs-cc-row">'
-                + '<button type="button" class="tgs-cc-btn tgs-cc-btn--ghost" data-act="cancel-other">Huỷ</button>'
-                + '<button type="submit" class="tgs-cc-btn tgs-cc-btn--primary">Tiếp tục</button>'
-                + '</div></form>';
-        }
+        if (view === 'team') return teamHtml();
 
         var s = state || {};
         var h = '';
@@ -204,17 +241,25 @@
         return h;
     }
 
-    function render(prefillLogin) {
+    function render() {
         if (!root) return;
-        var who = other
-            ? '<span class="tgs-cc-who__name">' + esc((state && state.user && state.user.name) || other.login) + '</span><span class="tgs-cc-tag tgs-cc-tag--warn">Tài khoản khác</span>'
-            : '<span class="tgs-cc-who__name">' + esc((state && state.user && state.user.name) || C.userName) + '</span>';
+        var who;
+        if (view === 'team') {
+            who = '<span class="tgs-cc-who__name">Điểm danh nhân viên trong ca</span><span class="tgs-cc-tag">Người điểm danh: ' + esc(C.userName) + '</span>';
+        } else if (other) {
+            who = '<span class="tgs-cc-who__name">' + esc((state && state.user && state.user.name) || other.name) + '</span><span class="tgs-cc-tag tgs-cc-tag--warn">Điểm danh hộ</span>';
+        } else {
+            who = '<span class="tgs-cc-who__name">' + esc((state && state.user && state.user.name) || C.userName) + '</span>';
+        }
         var foot = '';
-        if (view !== 'login' && view !== 'done') {
+        if (view !== 'done') {
             if (other) {
-                foot += '<button type="button" class="tgs-cc-link" data-act="cancel-other">← Trở về tài khoản của tôi</button>';
-            } else if (+C.allowOther) {
-                foot += '<button type="button" class="tgs-cc-link" data-act="other">Chấm công cho tài khoản khác</button>';
+                foot += '<button type="button" class="tgs-cc-link" data-act="team">← Danh sách nhân viên trong ca</button>';
+            }
+            if (other || view === 'team') {
+                foot += '<button type="button" class="tgs-cc-link" data-act="cancel-other">Về chấm công của tôi</button>';
+            } else if (+C.allowOther && view !== 'loading') {
+                foot += '<button type="button" class="tgs-cc-link" data-act="team">Điểm danh nhân viên khác trong ca</button>';
             }
             if (!standalone) {
                 foot += '<a class="tgs-cc-link" href="' + esc(C.standaloneUrl) + '" target="_blank" rel="noopener">Mở màn chấm công riêng ↗</a>';
@@ -225,10 +270,8 @@
             + (standalone ? '' : '<button type="button" class="tgs-cc-x" data-act="close" aria-label="Đóng">×</button>') + '</div>'
             + '<div class="tgs-cc-clock">' + clockHtml() + '</div>'
             + '<div class="tgs-cc-who">' + who + '</div>'
-            + '<div class="tgs-cc-body">' + body(prefillLogin) + '</div>'
+            + '<div class="tgs-cc-body">' + body() + '</div>'
             + (foot ? '<div class="tgs-cc-foot">' + foot + '</div>' : '');
-        var f = root.querySelector('[data-form="login"] input[name="' + (prefillLogin ? 'password' : 'login') + '"]');
-        if (f) f.focus();
     }
 
     function tickClock() {
@@ -253,18 +296,9 @@
         }
         if (act === 'out-confirm') return punch('out');
         if (act === 'cancel-out') { confirmOut = false; return render(); }
-        if (act === 'other') { other = null; errorMsg = ''; view = 'login'; return render(); }
-        if (act === 'cancel-other') { other = null; errorMsg = ''; return loadState(); }
-    }
-
-    function onSubmit(e) {
-        var form = e.target.closest('[data-form="login"]');
-        if (!form) return;
-        e.preventDefault();
-        other = { login: form.login.value.trim(), password: form.password.value };
-        state = null; // không hiện nhầm tên tài khoản đang đăng nhập trong lúc tải
-        errorMsg = '';
-        loadState();
+        if (act === 'team') { clearTimeout(backTimer); confirmOut = false; return loadTeam(); }
+        if (act === 'pick') return pickMember(+t.getAttribute('data-id'), t.getAttribute('data-name'));
+        if (act === 'cancel-other') { clearTimeout(backTimer); other = null; team = null; errorMsg = ''; return loadState(); }
     }
 
     function open(opts) {
@@ -274,7 +308,6 @@
             root.className = 'tgs-cc-overlay' + (standalone ? ' tgs-cc-overlay--standalone' : '');
             root.innerHTML = '<div class="tgs-cc-card" role="dialog" aria-modal="true" aria-label="Chấm công"></div>';
             root.addEventListener('click', onClick);
-            root.addEventListener('submit', onSubmit);
             document.body.appendChild(root);
         }
         root.hidden = false;
@@ -289,7 +322,8 @@
     function close() {
         if (!root) return;
         root.hidden = true;
-        other = null; // không giữ mật khẩu sau khi đóng
+        other = null; // đóng hộp thoại thì lần mở sau luôn về chấm công của chính mình
+        team = null;
         clearInterval(clockTimer);
         clearTimeout(backTimer);
         document.documentElement.classList.remove('tgs-cc-lock');

@@ -30,7 +30,7 @@ Plugin chấm công theo ca cho cửa hàng. Plugin **cắm vào** hai plugin g�
 - Nhân viên chấm bằng **tài khoản được cấp đang đăng nhập POS**. Bấm nút **Chấm công**:
   - chưa vào ca → hiện các ca đang trong giờ cho phép, bấm **Chấm vào**. Vào muộn thì báo trước số phút muộn.
   - đang trong ca → bấm **Chấm ra**. Ra sớm thì hỏi xác nhận.
-- **Máy quầy dùng chung một tài khoản**: "Chấm công cho tài khoản khác" → nhập tên đăng nhập + mật khẩu của mình. Hệ thống xác thực rồi chấm cho đúng người đó, **không đổi phiên bán hàng**. Mật khẩu không được lưu. Nhập sai 5 lần thì khoá 10 phút theo IP.
+- **Điểm danh nhân viên khác trong ca** (ca lồng nhau, 2–5 người bán cùng lúc): người **đang trong ca** (đã chấm vào) bấm "Điểm danh nhân viên khác trong ca" → danh sách đồng nghiệp có ca đang diễn ra (có lịch ở ca đang trong khung chấm, hoặc đang chấm vào chưa ra) → chọn người để chấm vào / ra hộ. Quản lý chấm công thì không cần đang trong ca. Shop không bắt buộc xếp lịch thì có thêm nhóm "Nhân viên khác". Server kiểm tra lại "cùng ca" ở mọi lượt bấm; nguồn ghi `pos_ho`, nhật ký ghi rõ người điểm danh hộ. **Không đổi phiên bán hàng.** Tắt / bật ở Cài đặt.
 - Màn riêng cho điện thoại / máy tính bảng đặt ở cửa: `https://<shop>/?tgs-cham-cong=1`.
 - Server kiểm tra lại mọi lần bấm (khung giờ ca, đã chấm chưa, IP cửa hàng, tháng đã chốt), không tin dữ liệu gửi từ trình duyệt. Mỗi nhân viên có khoá riêng (MySQL `GET_LOCK`) nên bấm cùng lúc từ 2 máy không mở được 2 ca.
 - **Site chạy sau Cloudflare / reverse proxy**: chọn ở Cài đặt → "Website chạy sau". Header IP (`CF-Connecting-IP`, `X-Forwarded-For`) chỉ được tin khi request đi qua đúng proxy đó.
@@ -44,6 +44,7 @@ Plugin chấm công theo ca cho cửa hàng. Plugin **cắm vào** hai plugin g�
 - **Làm thêm** (nếu bật): vào sớm / ra muộn hơn giờ ca từ N phút trở lên.
 - **Công** = số công của ca. Nếu bật nửa công thì tính theo giờ làm thực tế.
 - **Chấm công thiếu**: có vào mà quá giờ chấm ra vẫn chưa có ra → 0 công, quản lý sửa ở bảng chấm công.
+- **Ca lồng nhau**: nhiều nhân viên khác nhau làm các ca gối giờ nhau (ca sáng / giữa / chiều) là bình thường — mỗi ca bao nhiêu người cũng được. Chỉ **cùng một nhân viên** thì không được có 2 ca chồng giờ: xếp lịch 1 ô báo lỗi; xếp hàng loạt với các ca chọn chồng nhau báo lỗi, chồng với lịch đã có thì bỏ qua và báo số lượt bỏ qua; chép tuần cũng bỏ qua lượt chồng; quản lý nhập công chồng giờ với lượt khác của cùng người bị chặn (tránh tính giờ 2 lần); "Duyệt đủ công" không điền ca thứ hai bị chồng. Ca nối tiếp (14:00 hết, 14:00 vào) không tính là chồng.
 - **Chưa vào ca**: có lịch, ca đang diễn ra, chưa chấm — vẫn chấm vào được, **chưa** tính là vắng.
 - **Vắng**: có lịch, hết ca rồi vẫn không chấm.
 - Đổi luật tính công trong Cài đặt (muộn / sớm / làm thêm / nửa công) thì công **tháng hiện tại** được tính lại; sửa giờ / nghỉ / số công của một ca thì chỉ tính lại **các lượt của ca đó** trong tháng hiện tại. Chỉ dòng nào đổi mới được ghi lại. Các tháng trước và tháng đã chốt giữ nguyên.

@@ -328,7 +328,7 @@
         }
 
         function srcLabel(s) {
-            return { pos: 'POS', pos_khac: 'POS - tài khoản khác', admin: 'quản lý nhập', auto: 'duyệt theo lịch' }[s] || (s || '—');
+            return { pos: 'POS', pos_khac: 'POS - tài khoản khác', pos_ho: 'POS - đồng nghiệp điểm danh hộ', admin: 'quản lý nhập', auto: 'duyệt theo lịch' }[s] || (s || '—');
         }
 
         $('#cc-rec-mode').addEventListener('change', syncMode);

@@ -9,7 +9,8 @@ class TGS_CC_Settings
 {
     const OPTION = 'tgs_cc_settings';
 
-    private static $cache = null;
+    /** Cài đặt đã đọc, theo từng site — đổi site bằng switch_to_blog() không đọc nhầm cài đặt shop trước */
+    private static $cache = array();
 
     public static function defaults()
     {
@@ -28,7 +29,7 @@ class TGS_CC_Settings
             'standard_days'       => 26,
             // POS
             'require_schedule'    => 0, // 1 = chỉ được chấm ca đã xếp lịch
-            'allow_other_account' => 1, // cho chấm công bằng tài khoản + mật khẩu khác trên máy quầy
+            'allow_other_account' => 1, // cho người đang trong ca điểm danh hộ đồng nghiệp cùng ca trên POS
             'pos_button'          => 1, // hiện nút Chấm công trên màn POS
             'ip_whitelist'        => '', // mỗi dòng 1 IP / tiền tố / CIDR; để trống = không giới hạn
             // Lấy IP thật khi site chạy sau proxy: '' = không (REMOTE_ADDR) · 'cloudflare' · 'proxy' (nginx/LB riêng)
@@ -48,11 +49,12 @@ class TGS_CC_Settings
 
     public static function all()
     {
-        if (self::$cache === null) {
+        $b = get_current_blog_id();
+        if (!isset(self::$cache[$b])) {
             $saved = get_option(self::OPTION, array());
-            self::$cache = wp_parse_args(is_array($saved) ? $saved : array(), self::defaults());
+            self::$cache[$b] = wp_parse_args(is_array($saved) ? $saved : array(), self::defaults());
         }
-        return self::$cache;
+        return self::$cache[$b];
     }
 
     public static function get($key)
@@ -119,7 +121,7 @@ class TGS_CC_Settings
         }
 
         update_option(self::OPTION, $out, false);
-        self::$cache = null;
+        unset(self::$cache[get_current_blog_id()]);
         return self::all();
     }
 

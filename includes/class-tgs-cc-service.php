@@ -196,9 +196,10 @@ class TGS_CC_Service
     /** Tài khoản thuộc site hiện tại, trừ khách hàng / người đăng ký */
     public static function site_users()
     {
-        static $cache = null;
-        if ($cache === null) {
-            $cache = get_users(array(
+        static $cache = array(); // theo từng site
+        $b = get_current_blog_id();
+        if (!isset($cache[$b])) {
+            $cache[$b] = get_users(array(
                 'blog_id' => get_current_blog_id(),
                 'role__not_in' => apply_filters('tgs_cc_excluded_roles', array('customer', 'subscriber')),
                 'orderby' => 'display_name',
@@ -206,7 +207,7 @@ class TGS_CC_Service
                 'number' => 1000,
             ));
         }
-        return $cache;
+        return $cache[$b];
     }
 
     /**
@@ -221,7 +222,7 @@ class TGS_CC_Service
     public static function employees($include_excluded = false)
     {
         static $cache = array();
-        $key = $include_excluded ? 'all' : 'active';
+        $key = get_current_blog_id() . ($include_excluded ? '|all' : '|active'); // theo từng site
         if (isset($cache[$key])) {
             return $cache[$key];
         }
@@ -379,18 +380,25 @@ class TGS_CC_Service
         return $out;
     }
 
+    /** Ca đã đọc, khoá "mã site:mã ca" — shop khác nhau có thể trùng shift_id */
     private static $shift_cache = array();
+
+    private static function shift_key($id)
+    {
+        return get_current_blog_id() . ':' . (int) $id;
+    }
 
     public static function shift($id)
     {
         $id = (int) $id;
-        if (!array_key_exists($id, self::$shift_cache)) {
+        $k = self::shift_key($id);
+        if (!array_key_exists($k, self::$shift_cache)) {
             global $wpdb;
             $t = TGS_CC_DB::t('shifts');
             $r = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$t} WHERE shift_id = %d", $id), ARRAY_A);
-            self::$shift_cache[$id] = $r ? self::shift_public($r) : null;
+            self::$shift_cache[$k] = $r ? self::shift_public($r) : null;
         }
-        return self::$shift_cache[$id];
+        return self::$shift_cache[$k];
     }
 
     private static function shift_public($r)
@@ -445,6 +453,82 @@ class TGS_CC_Service
         );
     }
 
+    /**
+     * Hai lượt ca (ca, ngày) có chồng giờ nhau không — tính theo giờ ca thật
+     * [giờ vào, giờ ra), có xét ca qua đêm. Ca nối tiếp (14:00 hết, 14:00 vào) không tính là chồng.
+     *
+     * Ca LỒNG NHAU giữa CÁC NHÂN VIÊN KHÁC NHAU là bình thường (cửa hàng 2–5 người bán cùng lúc,
+     * ca sáng / ca giữa / ca chiều gối nhau). Chỉ MỘT nhân viên thì không làm 2 ca chồng giờ cùng lúc.
+     */
+    public static function shifts_overlap($sid_a, $date_a, $sid_b, $date_b)
+    {
+        $a = self::shift($sid_a);
+        $b = self::shift($sid_b);
+        if (!$a || !$b) {
+            return false;
+        }
+        $wa = self::window($a, $date_a);
+        $wb = self::window($b, $date_b);
+        return $wa['start'] < $wb['end'] && $wb['start'] < $wa['end'];
+    }
+
+    private static function shift_label($sid, $date = '')
+    {
+        $s = self::shift($sid);
+        if (!$s) {
+            return 'ca #' . (int) $sid;
+        }
+        return $s['name'] . ' (' . $s['start'] . '–' . $s['end'] . ($date ? ', ' . mysql2date('d/m', $date) : '') . ')';
+    }
+
+    private static function shift_day($date, $offset)
+    {
+        return wp_date('Y-m-d', self::ts($date . ' 12:00:00') + $offset * DAY_IN_SECONDS);
+    }
+
+    /**
+     * Lịch đã có của nhân viên chồng giờ với (ca, ngày) định xếp → trả về lượt bị chồng, không có → null.
+     * Xét cả ngày trước / ngày sau vì ca qua đêm. $skip_dates: các ngày sắp bị ghi đè, bỏ qua.
+     */
+    private static function schedule_conflict($user_id, $shift_id, $work_date, $skip_dates = array())
+    {
+        global $wpdb;
+        $rows = (array) $wpdb->get_results($wpdb->prepare(
+            'SELECT shift_id, work_date FROM ' . TGS_CC_DB::t('schedules') . ' WHERE user_id = %d AND work_date BETWEEN %s AND %s',
+            (int) $user_id,
+            self::shift_day($work_date, -1),
+            self::shift_day($work_date, 1)
+        ), ARRAY_A);
+        foreach ($rows as $r) {
+            if (in_array($r['work_date'], $skip_dates, true)) {
+                continue;
+            }
+            if ((int) $r['shift_id'] === (int) $shift_id && $r['work_date'] === $work_date) {
+                continue;
+            }
+            if (self::shifts_overlap($shift_id, $work_date, (int) $r['shift_id'], $r['work_date'])) {
+                return array((int) $r['shift_id'], $r['work_date']);
+            }
+        }
+        return null;
+    }
+
+    /** Trong danh sách ca chọn cho cùng một ngày có cặp nào chồng giờ không → WP_Error / null */
+    private static function shift_set_conflict($shift_ids, $work_date = '')
+    {
+        $date = $work_date ?: self::today();
+        $shift_ids = array_values($shift_ids);
+        for ($i = 0; $i < count($shift_ids); $i++) {
+            for ($j = $i + 1; $j < count($shift_ids); $j++) {
+                if (self::shifts_overlap($shift_ids[$i], $date, $shift_ids[$j], $date)) {
+                    return new WP_Error('overlap', self::shift_label($shift_ids[$i]) . ' và ' . self::shift_label($shift_ids[$j])
+                        . ' chồng giờ nhau — một nhân viên không làm 2 ca chồng giờ cùng lúc. (Nhiều nhân viên khác nhau làm các ca lồng nhau thì vẫn xếp bình thường.)');
+                }
+            }
+        }
+        return null;
+    }
+
     public static function shift_save($p)
     {
         global $wpdb;
@@ -494,7 +578,7 @@ class TGS_CC_Service
             $wpdb->insert($t, $data);
             $id = (int) $wpdb->insert_id;
         }
-        unset(self::$shift_cache[$id]);
+        unset(self::$shift_cache[self::shift_key($id)]);
         $new = self::shift($id) ?: self::shift_public(array_merge($data, array('shift_id' => $id)));
 
         // Chỉ những thay đổi ảnh hưởng cách tính công mới cần tính lại
@@ -523,7 +607,7 @@ class TGS_CC_Service
         }
         $deactivate = function ($why) use ($wpdb, $id) {
             $wpdb->update(TGS_CC_DB::t('shifts'), array('status' => 0, 'updated_at' => current_time('mysql')), array('shift_id' => $id));
-            unset(self::$shift_cache[$id]);
+            unset(self::$shift_cache[self::shift_key($id)]);
             return array('deleted' => false, 'message' => $why . ' nên không xoá được — đã chuyển sang Ngừng hoạt động.');
         };
         $used = (int) $wpdb->get_var($wpdb->prepare('SELECT COUNT(*) FROM ' . TGS_CC_DB::t('records') . ' WHERE shift_id = %d', $id));
@@ -766,6 +850,8 @@ class TGS_CC_Service
         $labels = array(
             'pos_in' => 'Chấm vào (POS)',
             'pos_out' => 'Chấm ra (POS)',
+            'pos_in_ho' => 'Chấm vào hộ (POS — đồng nghiệp trong ca)',
+            'pos_out_ho' => 'Chấm ra hộ (POS — đồng nghiệp trong ca)',
             'admin_edit' => 'Quản lý sửa',
             'admin_create' => 'Quản lý tạo',
             'admin_delete' => 'Quản lý xoá',
@@ -881,6 +967,17 @@ class TGS_CC_Service
             $data['leave_type'] = '';
             $data['check_in_at'] = $in ?: null;
             $data['check_out_at'] = $out ?: null;
+
+            // Cùng một nhân viên không thể có 2 lượt chấm công chồng giờ (ví dụ ca sáng 7–14 và ca giữa 10–18
+            // cùng đủ giờ) — nếu không giờ làm bị tính hai lần.
+            if ($in) {
+                $clash = self::record_time_conflict($uid, $sid, $date, self::ts($in), $out ? self::ts($out) : self::window($shift, $date)['end']);
+                if ($clash) {
+                    return new WP_Error('overlap', 'Giờ này chồng với lượt ' . self::shift_label((int) $clash['shift_id'], $clash['work_date'])
+                        . ' của cùng nhân viên (' . mysql2date('H:i', $clash['check_in_at']) . ' – ' . ($clash['check_out_at'] ? mysql2date('H:i', $clash['check_out_at']) : '…')
+                        . '). Sửa giờ ra của lượt đó trước, hoặc chỉnh giờ vào / ra cho không trùng.');
+                }
+            }
         }
 
         $old = self::find_record($uid, $sid, $date);
@@ -916,6 +1013,34 @@ class TGS_CC_Service
             'ghi_chu' => $note,
         ));
         return self::record_public($rec);
+    }
+
+    /** Lượt chấm công khác của nhân viên có khoảng [vào, ra) chồng lên [$from, $to) → dòng đó, không có → null */
+    private static function record_time_conflict($user_id, $shift_id, $work_date, $from, $to)
+    {
+        global $wpdb;
+        $rows = (array) $wpdb->get_results($wpdb->prepare(
+            'SELECT * FROM ' . TGS_CC_DB::t('records') . " WHERE user_id = %d AND work_date BETWEEN %s AND %s AND check_in_at IS NOT NULL AND leave_type = ''",
+            (int) $user_id,
+            self::shift_day($work_date, -1),
+            self::shift_day($work_date, 1)
+        ), ARRAY_A);
+        foreach ($rows as $r) {
+            if ((int) $r['shift_id'] === (int) $shift_id && $r['work_date'] === $work_date) {
+                continue;
+            }
+            $o_from = self::ts($r['check_in_at']);
+            if ($r['check_out_at']) {
+                $o_to = self::ts($r['check_out_at']);
+            } else {
+                $sh = self::shift((int) $r['shift_id']);
+                $o_to = $sh ? self::window($sh, $r['work_date'])['end'] : $o_from;
+            }
+            if ($from < $o_to && $o_from < $to) {
+                return $r;
+            }
+        }
+        return null;
     }
 
     public static function admin_delete_record($record_id)
@@ -955,6 +1080,10 @@ class TGS_CC_Service
             }
             $w = self::window($shift, $s['work_date']);
             if ($w['end'] > $now || self::find_record($s['user_id'], $s['shift_id'], $s['work_date'])) {
+                continue;
+            }
+            // Lịch cũ có 2 ca chồng giờ cho cùng người → không điền ca thứ hai (tránh tính giờ 2 lần)
+            if (self::record_time_conflict($s['user_id'], $s['shift_id'], $s['work_date'], $w['start'], $w['end'])) {
                 continue;
             }
             $wpdb->insert(TGS_CC_DB::t('records'), array(
@@ -1006,6 +1135,17 @@ class TGS_CC_Service
             return self::lock_error($work_date);
         }
         $shift_ids = array_values(array_unique(array_filter(array_map('intval', (array) $shift_ids))));
+        $err = self::shift_set_conflict($shift_ids, $work_date);
+        if ($err) {
+            return $err;
+        }
+        foreach ($shift_ids as $sid) {
+            $c = self::schedule_conflict($user_id, $sid, $work_date, array($work_date));
+            if ($c) {
+                return new WP_Error('overlap', self::shift_label($sid, $work_date) . ' chồng giờ với ' . self::shift_label($c[0], $c[1])
+                    . ' đã xếp cho nhân viên này. Bỏ một trong hai ca.');
+            }
+        }
         $current = $wpdb->get_col($wpdb->prepare("SELECT shift_id FROM {$t} WHERE user_id = %d AND work_date = %s", $user_id, $work_date));
         $current = array_map('intval', $current);
 
@@ -1018,10 +1158,17 @@ class TGS_CC_Service
         return $shift_ids;
     }
 
+    /** Số lượt bỏ qua ở lần xếp lịch gần nhất vì chồng giờ với ca đã xếp của cùng nhân viên */
+    public static $schedule_skipped = 0;
+
     private static function schedule_insert($user_id, $shift_id, $work_date)
     {
         global $wpdb;
         $t = TGS_CC_DB::t('schedules');
+        if (self::schedule_conflict($user_id, $shift_id, $work_date)) {
+            self::$schedule_skipped++;
+            return 0;
+        }
         return $wpdb->query($wpdb->prepare(
             "INSERT IGNORE INTO {$t} (user_id, shift_id, work_date, note, created_by, created_at) VALUES (%d, %d, %s, '', %d, %s)",
             (int) $user_id,
@@ -1046,6 +1193,12 @@ class TGS_CC_Service
         if (!$user_ids || !$shift_ids || !$weekdays) {
             return new WP_Error('invalid', 'Chọn ít nhất một nhân viên, một ca và một thứ trong tuần.');
         }
+        // Mỗi nhân viên được gán TẤT CẢ ca đã chọn → các ca chọn không được chồng giờ nhau
+        $err = self::shift_set_conflict($shift_ids);
+        if ($err) {
+            return $err;
+        }
+        self::$schedule_skipped = 0;
         $days = self::date_range($from, $to);
         if (count($days) > 93) {
             return new WP_Error('invalid', 'Mỗi lần xếp tối đa 93 ngày.');
@@ -1104,6 +1257,7 @@ class TGS_CC_Service
             ));
         }
         $offset = (int) round((self::ts($dst_monday . ' 12:00:00') - self::ts($src_monday . ' 12:00:00')) / DAY_IN_SECONDS);
+        self::$schedule_skipped = 0;
         $n = 0;
         foreach ($src as $s) {
             $d = wp_date('Y-m-d', self::ts($s['work_date'] . ' 12:00:00') + $offset * DAY_IN_SECONDS);
@@ -1618,6 +1772,131 @@ class TGS_CC_Service
     }
 
     /**
+     * Người đang đăng nhập POS có được điểm danh hộ đồng nghiệp không:
+     * phải ĐANG TRONG CA (đã chấm vào, chưa ra) — hoặc là quản lý chấm công.
+     */
+    public static function team_can_act($actor_id)
+    {
+        if (!TGS_CC_Settings::get('allow_other_account')) {
+            return new WP_Error('off', 'Cửa hàng đã tắt điểm danh nhân viên khác trong ca.');
+        }
+        if (function_exists('tgs_cc_user_can_manage') && tgs_cc_user_can_manage($actor_id)) {
+            return true;
+        }
+        if (!in_array((int) $actor_id, self::employee_ids(), true)) {
+            return new WP_Error('not_employee', 'Tài khoản đang đăng nhập không thuộc danh sách nhân viên chấm công.');
+        }
+        $st = self::pos_state($actor_id);
+        if ($st['mode'] !== 'out') {
+            return new WP_Error('not_in_shift', 'Bạn cần chấm VÀO ca của mình trước, rồi mới điểm danh được cho nhân viên khác trong ca.');
+        }
+        return true;
+    }
+
+    /**
+     * Đồng nghiệp TRONG CA lúc này (trừ chính người đang đăng nhập):
+     *   - có lịch ở một ca đang trong khung chấm công (từ giờ cho chấm vào tới hết giờ cho chấm ra), hoặc
+     *   - đang có lượt chấm vào chưa ra.
+     * Ca lồng nhau (ca sáng / giữa / chiều gối nhau) đều tính — ai đang trong khung ca nào cũng hiện.
+     * Shop không bắt buộc xếp lịch thì liệt kê thêm các nhân viên còn lại ở nhóm "Nhân viên khác".
+     *
+     * Trả về: members = [{id, name, mode, label, tone, shifts}], others = [{id, name}]
+     */
+    public static function team_state($actor_id)
+    {
+        global $wpdb;
+        $now = time();
+        $today = wp_date('Y-m-d', $now);
+        $yday = wp_date('Y-m-d', $now - DAY_IN_SECONDS);
+        $all_shifts = self::shifts(false);
+        $emp = self::employee_ids();
+        $in_shift = array(); // uid => [tên ca]
+
+        foreach ((array) $wpdb->get_results($wpdb->prepare(
+            'SELECT user_id, shift_id, work_date FROM ' . TGS_CC_DB::t('schedules') . ' WHERE work_date IN (%s, %s)',
+            $yday,
+            $today
+        ), ARRAY_A) as $s) {
+            $sh = isset($all_shifts[(int) $s['shift_id']]) ? $all_shifts[(int) $s['shift_id']] : null;
+            if (!$sh) {
+                continue;
+            }
+            $w = self::window($sh, $s['work_date']);
+            if ($now >= $w['open'] && $now <= $w['close']) {
+                $in_shift[(int) $s['user_id']][$sh['id']] = $sh['name'] . ' ' . $sh['start'] . '–' . $sh['end'];
+            }
+        }
+        foreach ((array) $wpdb->get_results($wpdb->prepare(
+            'SELECT user_id, shift_id, work_date FROM ' . TGS_CC_DB::t('records') . " WHERE work_date IN (%s, %s) AND check_in_at IS NOT NULL AND check_out_at IS NULL AND leave_type = ''",
+            $yday,
+            $today
+        ), ARRAY_A) as $r) {
+            $sh = isset($all_shifts[(int) $r['shift_id']]) ? $all_shifts[(int) $r['shift_id']] : null;
+            if ($sh && $now <= self::window($sh, $r['work_date'])['close']) {
+                $in_shift[(int) $r['user_id']][$sh['id']] = $sh['name'] . ' ' . $sh['start'] . '–' . $sh['end'];
+            }
+        }
+
+        $members = array();
+        foreach ($in_shift as $uid => $names) {
+            if ($uid === (int) $actor_id || !in_array($uid, $emp, true)) {
+                continue;
+            }
+            $st = self::pos_state($uid);
+            if ($st['mode'] === 'out') {
+                $label = 'Đang trong ' . $st['open']['shift'] . ' từ ' . $st['open']['check_in'];
+                $tone = 'success';
+            } elseif ($st['mode'] === 'in') {
+                $c = $st['candidates'][0];
+                $label = 'Chưa vào ' . $c['name'] . ($c['late_minutes'] > 0 ? ' — đã muộn ' . $c['late_minutes'] . ' phút' : '');
+                $tone = $c['late_minutes'] > 0 ? 'warning' : 'primary';
+            } else {
+                $label = 'Đã xong ca / không còn ca để chấm';
+                $tone = 'info';
+            }
+            $members[] = array(
+                'id' => $uid,
+                'name' => $st['user']['name'],
+                'mode' => $st['mode'],
+                'label' => $label,
+                'tone' => $tone,
+                'shifts' => array_values($names),
+            );
+        }
+        // Chưa vào ca lên đầu (cần điểm danh nhất), rồi đang trong ca, cuối cùng đã xong
+        $rank = array('in' => 0, 'out' => 1, 'none' => 2);
+        usort($members, function ($a, $b) use ($rank) {
+            return $rank[$a['mode']] - $rank[$b['mode']] ?: strcmp($a['name'], $b['name']);
+        });
+
+        $others = array();
+        if (empty(TGS_CC_Settings::get('require_schedule'))) {
+            foreach ($emp as $uid) {
+                if ($uid !== (int) $actor_id && !isset($in_shift[$uid])) {
+                    $others[] = array('id' => $uid, 'name' => self::user_name($uid));
+                }
+            }
+            usort($others, function ($a, $b) {
+                return strcmp($a['name'], $b['name']);
+            });
+        }
+
+        return array('members' => $members, 'others' => $others);
+    }
+
+    /** $target có phải đồng nghiệp được phép điểm danh hộ (nằm trong team_state của $actor) không */
+    public static function team_has($actor_id, $target_id)
+    {
+        $t = self::team_state($actor_id);
+        foreach (array_merge($t['members'], $t['others']) as $m) {
+            if ((int) $m['id'] === (int) $target_id) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Chấm vào / chấm ra. Luôn kiểm tra lại bằng pos_state() ngay lúc bấm —
      * không tin dữ liệu từ trình duyệt (màn có thể mở từ trước, giờ đã khác).
      */
@@ -1680,7 +1959,7 @@ class TGS_CC_Service
             }
             $rid = (int) $wpdb->insert_id;
             $rec = self::recompute($rid);
-            self::log($rid, $user_id, 'pos_in', array('nguon' => $source));
+            self::log($rid, $user_id, $source === 'pos_ho' ? 'pos_in_ho' : 'pos_in', array('nguon' => $source));
             $pub = self::record_public($rec);
             $msg = 'Đã chấm VÀO ' . self::shift($sid)['name'] . ' lúc ' . $pub['in'];
             if ($pub['late'] > 0) {
@@ -1709,7 +1988,7 @@ class TGS_CC_Service
                 'updated_at' => $now_mysql,
             ), array('record_id' => $rid));
             $rec = self::recompute($rid);
-            self::log($rid, $user_id, 'pos_out', array('nguon' => $source));
+            self::log($rid, $user_id, $source === 'pos_ho' ? 'pos_out_ho' : 'pos_out', array('nguon' => $source));
             $pub = self::record_public($rec);
             $msg = 'Đã chấm RA ' . $state['open']['shift'] . ' lúc ' . $pub['out'] . ' · ' . round($pub['worked'] / 60, 2) . ' giờ, ' . $pub['work_value'] . ' công';
             if ($pub['early'] > 0) {
