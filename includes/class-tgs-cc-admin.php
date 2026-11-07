@@ -93,6 +93,7 @@ class TGS_CC_Admin
             echo '<div class="alert alert-danger"><i class="bx bx-lock-alt"></i> Bạn không có quyền quản lý chấm công. Liên hệ quản lý cửa hàng để được cấp quyền.</div>';
             return false;
         }
+        TGS_CC_DB::maybe_install();
         $ver = TGS_CC_VERSION . '.' . (int) @filemtime(TGS_CC_DIR . 'assets/js/admin.js');
         $cfg = array(
             'ajaxUrl' => admin_url('admin-ajax.php'),
@@ -104,6 +105,7 @@ class TGS_CC_Admin
             'shifts' => array_values(TGS_CC_Service::shifts(false)),
             'settings' => TGS_CC_Settings::all(),
             'statuses' => TGS_CC_Service::status_labels(),
+            'canUnlock' => TGS_CC_Service::can_unlock(),
             'urls' => array(),
         );
         foreach (array_keys(self::views()) as $v) {
@@ -154,8 +156,9 @@ class TGS_CC_Admin
         if (!tgs_cc_user_can_manage()) {
             wp_send_json_error(array('message' => 'Bạn không có quyền quản lý chấm công.'), 403);
         }
+        TGS_CC_DB::maybe_install();
 
-        $op = isset($_POST['op']) ? sanitize_key($_POST['op']) : '';
+        $op =isset($_POST['op']) ? sanitize_key($_POST['op']) : '';
         $p = isset($_POST['payload']) ? json_decode(wp_unslash($_POST['payload']), true) : array();
         $p = is_array($p) ? $p : array();
         $users = isset($p['users']) ? array_map('intval', (array) $p['users']) : array();
@@ -187,8 +190,8 @@ class TGS_CC_Admin
                 if (!TGS_CC_Service::valid_date($date) || empty($p['user_id'])) {
                     wp_send_json_error(array('message' => 'Thiếu nhân viên hoặc ngày.'), 400);
                 }
-                TGS_CC_Service::schedule_set_cell((int) $p['user_id'], $date, isset($p['shift_ids']) ? $p['shift_ids'] : array());
-                wp_send_json_success(array('message' => 'Đã cập nhật lịch.'));
+                $r = TGS_CC_Service::schedule_set_cell((int) $p['user_id'], $date, isset($p['shift_ids']) ? $p['shift_ids'] : array());
+                self::respond($r, 'Đã cập nhật lịch.');
 
             case 'schedule_bulk':
                 list($from, $to) = self::range($p, 93);
@@ -202,23 +205,29 @@ class TGS_CC_Admin
                     wp_send_json_error(array('message' => 'Tuần không hợp lệ.'), 400);
                 }
                 $n = TGS_CC_Service::schedule_copy_week($src, $dst, $users, true);
-                wp_send_json_success(array('message' => 'Đã chép ' . $n . ' lượt ca sang tuần mới.'));
+                self::respond($n, is_wp_error($n) ? '' : 'Đã chép ' . $n . ' lượt ca sang tuần mới.');
 
             case 'schedule_clear':
                 list($from, $to) = self::range($p, 93);
                 $n = TGS_CC_Service::schedule_clear($from, $to, $users);
-                wp_send_json_success(array('message' => 'Đã xoá ' . $n . ' lượt ca.'));
+                self::respond($n, is_wp_error($n) ? '' : 'Đã xoá ' . $n . ' lượt ca.');
 
             case 'shift_list':
                 wp_send_json_success(array_values(TGS_CC_Service::shifts(false)));
 
             case 'shift_save':
                 $r = TGS_CC_Service::shift_save($p);
-                if (!is_wp_error($r) && !empty($p['id'])) {
-                    // Đổi giờ ca → tính lại công tháng đang chấm theo giờ mới
-                    TGS_CC_Service::recompute_from(wp_date('Y-m-01'));
+                $msg = 'Đã lưu ca làm việc.';
+                if (!is_wp_error($r)) {
+                    if (!empty($r['_recalc'])) {
+                        // Đổi giờ / nghỉ / số công của ca → tính lại công CỦA CA NÀY trong tháng đang chấm.
+                        // Tháng đã chốt giữ nguyên; tháng trước chưa chốt cũng không bị đụng.
+                        $n = TGS_CC_Service::recompute_from(wp_date('Y-m-01'), (int) $r['id']);
+                        $msg .= ' Đã tính lại ' . $n . ' lượt chấm công của ca này trong tháng ' . wp_date('m/Y') . '.';
+                    }
+                    unset($r['_recalc']);
                 }
-                self::respond($r, 'Đã lưu ca làm việc.');
+                self::respond($r, $msg);
 
             case 'shift_delete':
                 wp_send_json_success(TGS_CC_Service::shift_delete(isset($p['id']) ? (int) $p['id'] : 0));
@@ -235,13 +244,70 @@ class TGS_CC_Admin
                 wp_send_json_success(TGS_CC_Service::report_month(isset($p['month']) ? (string) $p['month'] : '', $users));
 
             case 'settings_save':
+                $before = TGS_CC_Settings::all();
                 $saved = TGS_CC_Settings::save($p);
-                // Luật mới áp cho cả tháng đang chấm; các tháng trước giữ nguyên (đã chốt bảng công)
-                $n = TGS_CC_Service::recompute_from(wp_date('Y-m-01'));
-                wp_send_json_success(array('settings' => $saved, 'message' => 'Đã lưu cài đặt, tính lại ' . $n . ' lượt chấm công của tháng này.'));
+                $msg = 'Đã lưu cài đặt.';
+                if (isset($p['managers'])) {
+                    $msg .= self::save_managers((array) $p['managers']);
+                }
+                // Chỉ tính lại khi luật tính công đổi; chỉ tháng đang chấm, bỏ qua tháng đã chốt
+                $calc_changed = false;
+                foreach (TGS_CC_Settings::calc_keys() as $k) {
+                    if ((string) $before[$k] !== (string) $saved[$k]) {
+                        $calc_changed = true;
+                        break;
+                    }
+                }
+                if ($calc_changed) {
+                    $n = TGS_CC_Service::recompute_from(wp_date('Y-m-01'));
+                    $msg .= ' Luật tính công thay đổi: đã tính lại ' . $n . ' lượt chấm công của tháng ' . wp_date('m/Y') . '.';
+                }
+                wp_send_json_success(array('settings' => $saved, 'message' => $msg));
+
+            case 'month_lock':
+                $month = isset($p['month']) ? (string) $p['month'] : '';
+                self::respond(TGS_CC_Service::month_lock($month), 'Đã chốt bảng công tháng ' . substr($month, 5, 2) . '/' . substr($month, 0, 4) . '.');
+
+            case 'month_unlock':
+                $month = isset($p['month']) ? (string) $p['month'] : '';
+                self::respond(TGS_CC_Service::month_unlock($month), 'Đã mở chốt bảng công tháng ' . substr($month, 5, 2) . '/' . substr($month, 0, 4) . '.');
         }
 
         wp_send_json_error(array('message' => 'Thao tác không hợp lệ.'), 400);
+    }
+
+    /** Người được cấp quyền quản lý chấm công riêng (không phải quản trị site) */
+    public static function is_manager_by_cap($user)
+    {
+        return $user instanceof WP_User && !empty($user->caps['tgs_manage_attendance']);
+    }
+
+    /**
+     * Cấp / thu quyền tgs_manage_attendance (quyền riêng của từng shop, lưu theo site).
+     * Chỉ quản trị site được đổi — quản lý được cấp quyền không tự cấp cho người khác.
+     */
+    private static function save_managers($ids)
+    {
+        if (!TGS_CC_Service::can_unlock()) {
+            return '';
+        }
+        $ids = array_map('intval', $ids);
+        $changed = 0;
+        foreach (TGS_CC_Service::site_users() as $u) {
+            if (user_can($u, 'manage_options')) {
+                continue; // quản trị site luôn có quyền
+            }
+            $want = in_array((int) $u->ID, $ids, true);
+            $has = self::is_manager_by_cap($u);
+            if ($want && !$has) {
+                $u->add_cap('tgs_manage_attendance');
+                $changed++;
+            } elseif (!$want && $has) {
+                $u->remove_cap('tgs_manage_attendance');
+                $changed++;
+            }
+        }
+        return $changed ? ' Đã cập nhật quyền quản lý chấm công cho ' . $changed . ' tài khoản.' : '';
     }
 
     private static function respond($r, $message)

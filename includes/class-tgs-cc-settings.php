@@ -30,9 +30,16 @@ class TGS_CC_Settings
             'require_schedule'    => 0, // 1 = chỉ được chấm ca đã xếp lịch
             'allow_other_account' => 1, // cho chấm công bằng tài khoản + mật khẩu khác trên máy quầy
             'pos_button'          => 1, // hiện nút Chấm công trên màn POS
-            'ip_whitelist'        => '', // mỗi dòng 1 IP / tiền tố; để trống = không giới hạn
-            // Danh sách nhân viên KHÔNG tham gia chấm công (user id)
+            'ip_whitelist'        => '', // mỗi dòng 1 IP / tiền tố / CIDR; để trống = không giới hạn
+            // Lấy IP thật khi site chạy sau proxy: '' = không (REMOTE_ADDR) · 'cloudflare' · 'proxy' (nginx/LB riêng)
+            'proxy_mode'          => '',
+            'trusted_proxies'     => '', // chỉ dùng với proxy_mode = 'proxy'; trống = mạng nội bộ
+            // Nhân viên chấm công = vai trò trong employee_roles (trừ excluded_users) + included_users
+            'employee_roles'      => array('tmd_pos_user'),
+            'included_users'      => array(),
             'excluded_users'      => array(),
+            // Gỡ plugin (Xoá trong trang Plugins) thì xoá luôn bảng chấm công của shop này
+            'delete_on_uninstall' => 0,
             // In báo cáo
             'report_title'        => '',
             'signers'             => "Người lập biểu\nQuản lý cửa hàng\nGiám đốc",
@@ -59,7 +66,8 @@ class TGS_CC_Settings
         $d = self::defaults();
         $out = array();
         $int_keys = array('late_grace', 'early_grace', 'overtime_min', 'standard_days');
-        $bool_keys = array('overtime_enabled', 'half_day_enabled', 'require_schedule', 'allow_other_account', 'pos_button');
+        $bool_keys = array('overtime_enabled', 'half_day_enabled', 'require_schedule', 'allow_other_account', 'pos_button', 'delete_on_uninstall');
+        $current = self::all();
 
         foreach ($int_keys as $k) {
             $out[$k] = isset($input[$k]) ? max(0, min(1440, (int) $input[$k])) : $d[$k];
@@ -76,12 +84,49 @@ class TGS_CC_Settings
         $out['report_title'] = isset($input['report_title']) ? sanitize_text_field($input['report_title']) : '';
         $out['signers'] = isset($input['signers']) ? sanitize_textarea_field($input['signers']) : $d['signers'];
 
-        $ex = isset($input['excluded_users']) ? (array) $input['excluded_users'] : array();
-        $out['excluded_users'] = array_values(array_unique(array_filter(array_map('intval', $ex))));
+        $mode = isset($input['proxy_mode']) ? (string) $input['proxy_mode'] : '';
+        $out['proxy_mode'] = in_array($mode, array('', 'cloudflare', 'proxy'), true) ? $mode : '';
+        $out['trusted_proxies'] = isset($input['trusted_proxies']) ? sanitize_textarea_field($input['trusted_proxies']) : '';
+
+        // Vai trò mặc định được chấm công
+        $all_roles = array_keys(wp_roles()->roles);
+        $roles = isset($input['employee_roles'])
+            ? array_values(array_intersect(array_map('sanitize_key', (array) $input['employee_roles']), $all_roles))
+            : (array) $current['employee_roles'];
+        $out['employee_roles'] = $roles;
+
+        // "members" = danh sách người được tích chấm công trên màn Cài đặt → quy ra
+        // ngoại lệ so với vai trò: included (không thuộc vai trò mà vẫn chấm), excluded (thuộc vai trò mà bỏ ra).
+        if (isset($input['members'])) {
+            $members = array_map('intval', (array) $input['members']);
+            $inc = array();
+            $exc = array();
+            foreach (TGS_CC_Service::site_users() as $u) {
+                $id = (int) $u->ID;
+                $by_role = (bool) array_intersect((array) $u->roles, $roles);
+                $want = in_array($id, $members, true);
+                if ($want && !$by_role) {
+                    $inc[] = $id;
+                } elseif (!$want && $by_role) {
+                    $exc[] = $id;
+                }
+            }
+            $out['included_users'] = $inc;
+            $out['excluded_users'] = $exc;
+        } else {
+            $out['included_users'] = array_values(array_map('intval', (array) $current['included_users']));
+            $out['excluded_users'] = array_values(array_map('intval', (array) $current['excluded_users']));
+        }
 
         update_option(self::OPTION, $out, false);
         self::$cache = null;
         return self::all();
+    }
+
+    /** Các khoá cài đặt ảnh hưởng tới cách tính công — đổi khoá nào thì mới phải tính lại */
+    public static function calc_keys()
+    {
+        return array('late_grace', 'early_grace', 'overtime_enabled', 'overtime_min', 'half_day_enabled', 'half_day_from', 'half_day_to');
     }
 
     /** IP của máy đang gọi có nằm trong danh sách cho phép không (trống = cho tất cả) */
@@ -91,17 +136,7 @@ class TGS_CC_Settings
         if ($list === '') {
             return true;
         }
-        foreach (preg_split('/[\r\n,;]+/', $list) as $line) {
-            $line = trim($line);
-            if ($line === '') {
-                continue;
-            }
-            // Cho phép tiền tố "113.161.12." hoặc ký tự đại diện "113.161.12.*"
-            $prefix = rtrim($line, '*');
-            if ($ip === $line || ($prefix !== $line && strpos($ip, $prefix) === 0) || (substr($line, -1) === '.' && strpos($ip, $line) === 0)) {
-                return true;
-            }
-        }
-        return false;
+        // Mỗi dòng: IP, CIDR "113.161.12.0/24", tiền tố "113.161.12." hoặc "113.161.12.*"
+        return TGS_CC_Service::ip_in_list($ip, preg_split('/[\r\n,;]+/', $list));
     }
 }

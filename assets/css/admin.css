@@ -124,3 +124,17 @@
     .tgs-cc-month .m-late, .tgs-cc-month .m-warn, .tgs-cc-month .m-bad, .tgs-cc-month .m-leave, .tgs-cc-month td.is-sun { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     .tgs-cc-signs { page-break-inside: avoid; }
 }
+
+/* Ca đang diễn ra, có lịch mà chưa chấm vào — chưa tính là vắng */
+.st-chua_vao { --st-bg: #fff; --st-fg: var(--ds-warning); }
+.tgs-cc-chip.st-chua_vao { border-style: dashed; }
+
+/* Thanh trạng thái chốt bảng công tháng */
+.tgs-cc-lockbar {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+    margin: 0 0 10px; padding: 8px 12px;
+    border: 1px solid var(--ds-border); border-radius: var(--ds-radius);
+    background: var(--ds-surface-sunken); color: var(--ds-text-secondary); font-size: var(--ds-fs-sm);
+}
+.tgs-cc-lockbar.is-locked { border-color: var(--ds-primary); background: var(--ds-primary-soft); color: var(--ds-primary); }
+@media print { .tgs-cc-noprint { display: none !important; } }

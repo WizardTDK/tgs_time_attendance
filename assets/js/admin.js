@@ -95,13 +95,21 @@
     }
 
     function legendHtml() {
-        var order = ['dung_gio', 'di_muon', 've_som', 'thieu', 'dang_lam', 'chua_cham', 'nghi_co_phep', 'nghi_khong_phep', 'lich'];
+        var order = ['dung_gio', 'di_muon', 've_som', 'thieu', 'dang_lam', 'chua_vao', 'chua_cham', 'nghi_co_phep', 'nghi_khong_phep', 'lich'];
         return order.map(function (k) {
             return '<span class="tgs-cc-lg"><i class="tgs-cc-sw st-' + k + '"></i>' + esc(C.statuses[k][0]) + '</span>';
         }).join('');
     }
 
     function empty(msg) { return '<div class="tgs-cc-empty">' + esc(msg) + '</div>'; }
+
+    /** Dòng báo các tháng đã chốt trong khoảng đang xem (bảng chấm công / xếp lịch) */
+    function lockedBanner(d) {
+        if (!d || !d.locked || !d.locked.length) return '';
+        var names = d.locked.map(function (m) { return m.slice(5, 7) + '/' + m.slice(0, 4); }).join(', ');
+        return '<div class="tgs-cc-lockbar is-locked"><i class="bx bx-lock-alt"></i> Bảng công tháng ' + esc(names)
+            + ' đã chốt: không sửa được công và lịch của các ngày thuộc tháng này.</div>';
+    }
 
     /* ═══════════════════════════ XUẤT EXCEL CÓ ĐỊNH DẠNG ═══════════════════════════ */
 
@@ -273,7 +281,7 @@
                 h += '<td class="tgs-cc-grid__sum">' + num(total) + '</td></tr>';
             });
             h += '</tbody></table>';
-            $('#cc-board').innerHTML = h;
+            $('#cc-board').innerHTML = lockedBanner(data) + h;
         }
 
         function find(uid, day, sid) {
@@ -488,7 +496,7 @@
                 }).join('') + '</td>';
             });
             h += '</tr></tfoot></table>';
-            $('#cc-board').innerHTML = h;
+            $('#cc-board').innerHTML = lockedBanner(data) + h;
         }
 
         $('#cc-board').addEventListener('click', function (e) {
@@ -709,10 +717,38 @@
             return 'BẢNG CHẤM CÔNG THÁNG ' + data.month.slice(5, 7) + '/' + data.month.slice(0, 4);
         }
 
+        function lockBar(d) {
+            var label = d.month.slice(5, 7) + '/' + d.month.slice(0, 4);
+            if (d.lock) {
+                return '<div class="tgs-cc-lockbar is-locked tgs-cc-noprint"><i class="bx bx-lock-alt"></i> Bảng công tháng ' + label + ' đã chốt'
+                    + (d.lock.by ? ' bởi <b>' + esc(d.lock.by) + '</b>' : '') + (d.lock.at ? ' lúc ' + esc(d.lock.at) : '')
+                    + '. Công, lịch và giờ ca của tháng này không còn bị thay đổi.'
+                    + (d.can_unlock ? ' <button type="button" class="btn btn-sm btn-secondary ms-auto" id="cc-unlock" data-m="' + esc(d.month) + '"><i class="bx bx-lock-open-alt"></i> Mở chốt</button>' : '')
+                    + '</div>';
+            }
+            if (d.can_lock) {
+                return '<div class="tgs-cc-lockbar tgs-cc-noprint"><i class="bx bx-info-circle"></i> Tháng ' + label + ' chưa chốt: sửa ca, sửa công hoặc đổi cài đặt vẫn có thể làm số liệu thay đổi. Kiểm tra xong thì chốt để khoá lại.'
+                    + ' <button type="button" class="btn btn-sm btn-primary ms-auto" id="cc-lock" data-m="' + esc(d.month) + '"><i class="bx bx-lock-alt"></i> Chốt bảng công tháng ' + label + '</button></div>';
+            }
+            return '<div class="tgs-cc-lockbar tgs-cc-noprint"><i class="bx bx-time-five"></i> Tháng ' + label + ' chưa kết thúc — chốt được từ ngày đầu tháng sau.</div>';
+        }
+
+        $('#cc-report').addEventListener('click', function (e) {
+            var b = e.target.closest('#cc-lock, #cc-unlock');
+            if (!b) return;
+            var m = b.dataset.m, label = m.slice(5, 7) + '/' + m.slice(0, 4);
+            var lock = b.id === 'cc-lock';
+            if (!window.confirm(lock
+                ? 'Chốt bảng công tháng ' + label + '?\nSau khi chốt: không sửa được công, lịch của tháng này; sửa giờ ca hay đổi cài đặt cũng không làm thay đổi công tháng này.'
+                : 'Mở chốt bảng công tháng ' + label + '?\nSố liệu tháng này sẽ sửa được trở lại.')) return;
+            busy(b, true);
+            api(lock ? 'month_lock' : 'month_unlock', { month: m }).then(function (d) { toast(d.message); load(); }).finally(function () { busy(b, false); });
+        });
+
         function renderMonth() {
             var d = data;
-            if (!d.rows.length) { $('#cc-report').innerHTML = empty('Không có nhân viên nào.'); return; }
-            var h = '<div class="tgs-cc-print-head"><div class="tgs-cc-print-head__org">' + esc(d.report_title || d.shop_name) + '</div>'
+            if (!d.rows.length) { $('#cc-report').innerHTML = lockBar(d) + empty('Không có nhân viên nào.'); return; }
+            var h = lockBar(d) + '<div class="tgs-cc-print-head"><div class="tgs-cc-print-head__org">' + esc(d.report_title || d.shop_name) + '</div>'
                 + '<div class="tgs-cc-print-head__title">' + monthTitle() + '</div>'
                 + '<div class="tgs-cc-print-head__meta">Từ ngày ' + dmy(d.from) + ' đến ngày ' + dmy(d.to) + ' · Ngày công chuẩn: ' + d.standard_days + '</div></div>';
             h += '<div class="tgs-cc-month-wrap"><table class="tgs-cc-month" data-ds-no-resize data-ds-no-export><thead><tr>'
@@ -925,7 +961,9 @@
                 if (el.type === 'checkbox') p[el.name] = el.checked ? 1 : 0;
                 else p[el.name] = el.value;
             });
-            p.excluded_users = $$('.cc-emp', form).filter(function (c) { return !c.checked; }).map(function (c) { return +c.value; });
+            p.members = $$('.cc-emp', form).filter(function (c) { return c.checked; }).map(function (c) { return +c.value; });
+            p.employee_roles = $$('.cc-role', form).filter(function (c) { return c.checked; }).map(function (c) { return c.value; });
+            if (C.canUnlock) p.managers = $$('.cc-mgr', form).filter(function (c) { return c.checked && !c.disabled; }).map(function (c) { return +c.value; });
             busy(btn, true);
             api('settings_save', p).then(function (d) { toast(d.message); }).finally(function () { busy(btn, false); });
         });

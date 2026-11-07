@@ -22,7 +22,7 @@
 
 defined('ABSPATH') || exit;
 
-define('TGS_CC_VERSION', '1.0.0');
+define('TGS_CC_VERSION', '1.1.0');
 define('TGS_CC_FILE', __FILE__);
 define('TGS_CC_DIR', plugin_dir_path(__FILE__));
 define('TGS_CC_URL', plugin_dir_url(__FILE__));
@@ -35,8 +35,8 @@ require_once TGS_CC_DIR . 'includes/class-tgs-cc-pos.php';
 
 register_activation_hook(__FILE__, array('TGS_CC_DB', 'activate'));
 
-// Multisite: mỗi site tự tạo bảng khi có người mở trang (không bắt kích hoạt lại 650 shop).
-add_action('init', array('TGS_CC_DB', 'maybe_install'), 5);
+// Multisite: bảng của mỗi shop chỉ được tạo khi shop đó thật sự dùng chấm công
+// (TGS_CC_DB::maybe_install() ở màn quản trị / AJAX / màn chấm công riêng), không tạo trên mọi lượt mở trang.
 
 TGS_CC_Admin::init();
 TGS_CC_POS::init();

@@ -67,7 +67,8 @@ class TGS_CC_POS
 
     public static function render_widget()
     {
-        if (!self::$on_pos || !is_user_logged_in() || !TGS_CC_Settings::get('pos_button')) {
+        // Shop chưa từng dùng chấm công (quản lý chưa mở màn chấm công lần nào) → không hiện nút, không tạo bảng
+        if (!self::$on_pos || !is_user_logged_in() || !TGS_CC_DB::installed() || !TGS_CC_Settings::get('pos_button')) {
             return;
         }
         // Trang con của POS mở trong hộp thoại (iframe) không vẽ nút lần nữa
@@ -91,6 +92,7 @@ class TGS_CC_POS
             wp_safe_redirect(wp_login_url(self::standalone_url()));
             exit;
         }
+        TGS_CC_DB::maybe_install();
         nocache_headers();
         ?><!DOCTYPE html>
 <html lang="vi">
@@ -165,6 +167,7 @@ class TGS_CC_POS
         if (!check_ajax_referer(self::NONCE, 'nonce', false)) {
             wp_send_json_error(array('message' => 'nonce', 'code' => 'nonce'), 403);
         }
+        TGS_CC_DB::maybe_install();
 
         $uid = get_current_user_id();
         $other = !empty($_POST['login']);

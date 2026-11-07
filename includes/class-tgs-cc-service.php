@@ -12,7 +12,8 @@
  *                    ra tới muộn nhất (giờ ra + checkout_after).
  *   Đi muộn          vào sau giờ vào > late_grace phút  → ghi số phút muộn.
  *   Về sớm           ra trước giờ ra > early_grace phút → ghi số phút sớm.
- *   Giờ làm          từ max(vào, giờ vào ca) tới min(ra, giờ ra ca) − nghỉ giữa ca.
+ *   Giờ làm          từ max(vào, giờ vào ca) tới min(ra, giờ ra ca) − nghỉ giữa ca
+ *                    (có mặt cả ca thì trừ đủ; có mặt một phần thì trừ theo tỷ lệ).
  *   Làm thêm         (nếu bật) vào sớm / ra muộn hơn giờ ca ≥ overtime_min phút.
  *   Công             số công của ca; bật "nửa công" thì theo giờ làm thực tế.
  *   Chấm thiếu       có vào mà không có ra (đã quá giờ cho phép chấm ra) → 0 công.
@@ -66,17 +67,156 @@ class TGS_CC_Service
         return $out;
     }
 
+    /* ═══════════════════════════ IP MÁY CHẤM ═══════════════════════════ */
+
+    private static function clean_ip($ip)
+    {
+        $ip = trim((string) $ip);
+        return filter_var($ip, FILTER_VALIDATE_IP) ? $ip : '';
+    }
+
+    /**
+     * IP thật của máy đang gọi.
+     *
+     * Mặc định chỉ tin REMOTE_ADDR. Site chạy sau Cloudflare / reverse proxy thì
+     * REMOTE_ADDR là IP của proxy (mọi máy giống nhau) → bật "proxy_mode" trong
+     * Cài đặt. Header IP chỉ được tin khi request ĐẾN TỪ proxy đáng tin, nếu
+     * không ai cũng tự gửi header giả được.
+     */
     public static function client_ip()
     {
-        $ip = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : '';
-        return substr(preg_replace('/[^0-9a-fA-F:.]/', '', $ip), 0, 64);
+        static $ip = null;
+        if ($ip !== null) {
+            return $ip;
+        }
+        $remote = self::clean_ip(isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '');
+        $ip = $remote;
+        $mode = (string) TGS_CC_Settings::get('proxy_mode');
+
+        if ($mode === 'cloudflare' && $remote && self::ip_in_list($remote, self::cloudflare_ranges())) {
+            $cf = self::clean_ip(isset($_SERVER['HTTP_CF_CONNECTING_IP']) ? wp_unslash($_SERVER['HTTP_CF_CONNECTING_IP']) : '');
+            if ($cf) {
+                $ip = $cf;
+            }
+        } elseif ($mode === 'proxy' && $remote && self::ip_in_list($remote, self::trusted_proxies())) {
+            $found = '';
+            $xff = isset($_SERVER['HTTP_X_FORWARDED_FOR']) ? (string) wp_unslash($_SERVER['HTTP_X_FORWARDED_FOR']) : '';
+            if ($xff !== '') {
+                // Đi từ phải sang trái, bỏ qua các proxy tin cậy → IP đầu tiên không phải proxy là máy khách
+                $chain = array_reverse(array_map('trim', explode(',', $xff)));
+                foreach ($chain as $cand) {
+                    $cand = self::clean_ip($cand);
+                    if ($cand && !self::ip_in_list($cand, self::trusted_proxies())) {
+                        $found = $cand;
+                        break;
+                    }
+                }
+            }
+            if (!$found) {
+                $found = self::clean_ip(isset($_SERVER['HTTP_X_REAL_IP']) ? wp_unslash($_SERVER['HTTP_X_REAL_IP']) : '');
+            }
+            if ($found) {
+                $ip = $found;
+            }
+        }
+        return substr($ip, 0, 64);
+    }
+
+    /** Dải IP của Cloudflare (https://www.cloudflare.com/ips/) — đổi qua filter tgs_cc_cloudflare_ranges */
+    public static function cloudflare_ranges()
+    {
+        return (array) apply_filters('tgs_cc_cloudflare_ranges', array(
+            '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22', '141.101.64.0/18',
+            '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22', '198.41.128.0/17',
+            '162.158.0.0/15', '104.16.0.0/13', '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
+            '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32', '2405:8100::/32',
+            '2a06:98c0::/29', '2c0f:f248::/32',
+        ));
+    }
+
+    /** Proxy tin cậy: danh sách trong Cài đặt; để trống = mạng nội bộ (proxy cùng máy / cùng mạng docker) */
+    public static function trusted_proxies()
+    {
+        $list = array_filter(array_map('trim', preg_split('/[\r\n,;]+/', (string) TGS_CC_Settings::get('trusted_proxies'))));
+        return $list ? array_values($list) : array('127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '::1/128', 'fc00::/7');
+    }
+
+    public static function ip_in_list($ip, $rules)
+    {
+        foreach ((array) $rules as $rule) {
+            if (self::ip_match($ip, $rule)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * IP có khớp một luật không. Luật nhận: IP đầy đủ, CIDR (113.161.12.0/24),
+     * tiền tố kết thúc bằng dấu chấm (113.161.12.) hoặc dấu sao (113.161.12.*).
+     */
+    public static function ip_match($ip, $rule)
+    {
+        $ip = trim((string) $ip);
+        $rule = trim((string) $rule);
+        if ($ip === '' || $rule === '') {
+            return false;
+        }
+        if ($ip === $rule) {
+            return true;
+        }
+        if (strpos($rule, '/') !== false) {
+            list($net, $bits) = explode('/', $rule, 2);
+            $a = @inet_pton($ip);
+            $b = @inet_pton(trim($net));
+            if ($a === false || $b === false || strlen($a) !== strlen($b) || !is_numeric($bits)) {
+                return false;
+            }
+            $bits = max(0, min(strlen($a) * 8, (int) $bits));
+            $bytes = intdiv($bits, 8);
+            if ($bytes && substr($a, 0, $bytes) !== substr($b, 0, $bytes)) {
+                return false;
+            }
+            $rest = $bits % 8;
+            if ($rest) {
+                $mask = (0xFF << (8 - $rest)) & 0xFF;
+                return (ord($a[$bytes]) & $mask) === (ord($b[$bytes]) & $mask);
+            }
+            return true;
+        }
+        $prefix = rtrim($rule, '*');
+        if ($prefix !== $rule || substr($rule, -1) === '.' || substr($rule, -1) === ':') {
+            return $prefix !== '' && strpos($ip, $prefix) === 0;
+        }
+        return false;
     }
 
     /* ═══════════════════════════ NHÂN VIÊN ═══════════════════════════ */
 
+    /** Tài khoản thuộc site hiện tại, trừ khách hàng / người đăng ký */
+    public static function site_users()
+    {
+        static $cache = null;
+        if ($cache === null) {
+            $cache = get_users(array(
+                'blog_id' => get_current_blog_id(),
+                'role__not_in' => apply_filters('tgs_cc_excluded_roles', array('customer', 'subscriber')),
+                'orderby' => 'display_name',
+                'order' => 'ASC',
+                'number' => 1000,
+            ));
+        }
+        return $cache;
+    }
+
     /**
-     * Nhân viên của shop = tài khoản WordPress thuộc site hiện tại (tài khoản
-     * được cấp để đăng nhập POS / quản trị), trừ khách hàng và người đăng ký.
+     * Nhân viên chấm công của shop:
+     *   - tài khoản có vai trò nằm trong "employee_roles" (mặc định tmd_pos_user — nhân viên POS),
+     *     trừ người bị bỏ ra (excluded_users);
+     *   - cộng thêm người được chọn tay (included_users), vai trò nào cũng được.
+     * Tài khoản admin / kế toán / tài khoản mới tạo với vai trò khác KHÔNG tự vào danh sách.
+     *
+     * $include_excluded = true: trả cả tài khoản không tham gia (cờ excluded) — dùng cho màn Cài đặt.
      */
     public static function employees($include_excluded = false)
     {
@@ -86,31 +226,129 @@ class TGS_CC_Service
             return $cache[$key];
         }
 
-        $users = get_users(array(
-            'blog_id' => get_current_blog_id(),
-            'role__not_in' => apply_filters('tgs_cc_excluded_roles', array('customer', 'subscriber')),
-            'orderby' => 'display_name',
-            'order' => 'ASC',
-            'number' => 500,
-        ));
+        $roles = array_map('strval', (array) TGS_CC_Settings::get('employee_roles'));
+        $included = array_map('intval', (array) TGS_CC_Settings::get('included_users'));
         $excluded = array_map('intval', (array) TGS_CC_Settings::get('excluded_users'));
 
         $out = array();
-        foreach ($users as $u) {
-            $is_excluded = in_array((int) $u->ID, $excluded, true);
-            if ($is_excluded && !$include_excluded) {
+        foreach (self::site_users() as $u) {
+            $id = (int) $u->ID;
+            $by_role = (bool) array_intersect((array) $u->roles, $roles);
+            $in = in_array($id, $included, true) || ($by_role && !in_array($id, $excluded, true));
+            if (!$in && !$include_excluded) {
                 continue;
             }
             $out[] = array(
-                'id' => (int) $u->ID,
+                'id' => $id,
                 'name' => $u->display_name ?: $u->user_login,
                 'login' => $u->user_login,
                 'roles' => implode(', ', (array) $u->roles),
-                'excluded' => $is_excluded,
+                'excluded' => !$in,
+                'by_role' => $by_role,
             );
         }
         $cache[$key] = apply_filters('tgs_cc_employees', $out, $include_excluded);
         return $cache[$key];
+    }
+
+    /** Tài khoản có thuộc cửa hàng này không (kể cả người đang không tham gia chấm công) */
+    public static function is_shop_user($user_id)
+    {
+        return in_array((int) $user_id, wp_list_pluck(self::employees(true), 'id'), true);
+    }
+
+    /* ═══════════════════════════ CHỐT THÁNG ═══════════════════════════ */
+
+    const LOCK_OPTION = 'tgs_cc_locks';
+
+    /** Các tháng đã chốt: array('Y-m' => array('by' => user_id, 'at' => 'Y-m-d H:i:s')) */
+    public static function locks()
+    {
+        $l = get_option(self::LOCK_OPTION, array());
+        return is_array($l) ? $l : array();
+    }
+
+    public static function is_locked($date)
+    {
+        $locks = self::locks();
+        return isset($locks[substr((string) $date, 0, 7)]);
+    }
+
+    /** Các tháng đã chốt nằm trong khoảng ngày */
+    public static function locked_between($from, $to)
+    {
+        $out = array();
+        foreach (array_keys(self::locks()) as $m) {
+            if ($m >= substr($from, 0, 7) && $m <= substr($to, 0, 7)) {
+                $out[] = $m;
+            }
+        }
+        sort($out);
+        return $out;
+    }
+
+    public static function lock_error($date)
+    {
+        $m = substr((string) $date, 0, 7);
+        return new WP_Error('locked', 'Bảng công tháng ' . substr($m, 5, 2) . '/' . substr($m, 0, 4) . ' đã chốt nên không sửa được. Cần quản trị cửa hàng mở chốt tháng trước.');
+    }
+
+    /** Người được mở chốt: chỉ quản trị site (quản lý được cấp quyền chấm công không tự mở được) */
+    public static function can_unlock($user_id = 0)
+    {
+        $user_id = $user_id ?: get_current_user_id();
+        return is_super_admin($user_id) || user_can($user_id, 'manage_options');
+    }
+
+    /** Chỉ chốt được tháng đã kết thúc */
+    public static function can_lock_month($month)
+    {
+        return preg_match('/^\d{4}-\d{2}$/', (string) $month) && $month < wp_date('Y-m');
+    }
+
+    public static function month_lock($month)
+    {
+        if (!self::can_lock_month($month)) {
+            return new WP_Error('invalid', 'Chỉ chốt được tháng đã kết thúc.');
+        }
+        $locks = self::locks();
+        if (isset($locks[$month])) {
+            return new WP_Error('invalid', 'Tháng này đã chốt rồi.');
+        }
+        $locks[$month] = array('by' => get_current_user_id(), 'at' => current_time('mysql'));
+        ksort($locks);
+        update_option(self::LOCK_OPTION, $locks, false);
+        self::log(0, 0, 'month_lock', array('thang' => $month));
+        return self::lock_info($month);
+    }
+
+    public static function month_unlock($month)
+    {
+        if (!self::can_unlock()) {
+            return new WP_Error('forbidden', 'Chỉ quản trị cửa hàng được mở chốt bảng công.');
+        }
+        $locks = self::locks();
+        if (!isset($locks[$month])) {
+            return new WP_Error('invalid', 'Tháng này chưa chốt.');
+        }
+        unset($locks[$month]);
+        update_option(self::LOCK_OPTION, $locks, false);
+        self::log(0, 0, 'month_unlock', array('thang' => $month));
+        return true;
+    }
+
+    /** Thông tin chốt của một tháng để hiện ra giao diện (null = chưa chốt) */
+    public static function lock_info($month)
+    {
+        $locks = self::locks();
+        if (!isset($locks[$month])) {
+            return null;
+        }
+        $l = $locks[$month];
+        return array(
+            'by' => self::user_name(isset($l['by']) ? $l['by'] : 0),
+            'at' => !empty($l['at']) ? mysql2date('d/m/Y H:i', $l['at']) : '',
+        );
     }
 
     public static function employee_ids($filter = array())
@@ -141,17 +379,18 @@ class TGS_CC_Service
         return $out;
     }
 
+    private static $shift_cache = array();
+
     public static function shift($id)
     {
-        static $cache = array();
         $id = (int) $id;
-        if (!isset($cache[$id])) {
+        if (!array_key_exists($id, self::$shift_cache)) {
             global $wpdb;
             $t = TGS_CC_DB::t('shifts');
             $r = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$t} WHERE shift_id = %d", $id), ARRAY_A);
-            $cache[$id] = $r ? self::shift_public($r) : null;
+            self::$shift_cache[$id] = $r ? self::shift_public($r) : null;
         }
-        return $cache[$id];
+        return self::$shift_cache[$id];
     }
 
     private static function shift_public($r)
@@ -176,15 +415,18 @@ class TGS_CC_Service
         );
     }
 
-    private static function shift_hours($start, $end, $break)
+    /** Độ dài ca theo phút (ca qua đêm cộng 24h) */
+    private static function shift_minutes($start, $end)
     {
         list($sh, $sm) = array_map('intval', explode(':', $start));
         list($eh, $em) = array_map('intval', explode(':', $end));
         $mins = ($eh * 60 + $em) - ($sh * 60 + $sm);
-        if ($mins <= 0) {
-            $mins += 1440;
-        }
-        return round(max(0, $mins - $break) / 60, 2);
+        return $mins <= 0 ? $mins + 1440 : $mins;
+    }
+
+    private static function shift_hours($start, $end, $break)
+    {
+        return round(max(0, self::shift_minutes($start, $end) - $break) / 60, 2);
     }
 
     /** Mốc giờ thật của một ca trong một ngày: start, end, open (sớm nhất được chấm vào), close (muộn nhất được chấm ra) */
@@ -223,13 +465,18 @@ class TGS_CC_Service
             $code = str_replace('-', '_', $code);
         }
         $color = sanitize_hex_color(isset($p['color']) ? $p['color'] : '') ?: '#1e4fa3';
+        $break = max(0, min(600, (int) (isset($p['break_minutes']) ? $p['break_minutes'] : 0)));
+        $len = self::shift_minutes($start, $end);
+        if ($break >= $len) {
+            return new WP_Error('invalid', 'Nghỉ giữa ca (' . $break . ' phút) phải ngắn hơn độ dài ca (' . $len . ' phút).');
+        }
 
         $data = array(
             'shift_code' => substr($code, 0, 30),
             'shift_name' => substr($name, 0, 100),
             'start_time' => $start . ':00',
             'end_time' => $end . ':00',
-            'break_minutes' => max(0, min(600, (int) (isset($p['break_minutes']) ? $p['break_minutes'] : 0))),
+            'break_minutes' => $break,
             'checkin_before' => max(0, min(720, (int) (isset($p['checkin_before']) ? $p['checkin_before'] : 60))),
             'checkout_after' => max(0, min(720, (int) (isset($p['checkout_after']) ? $p['checkout_after'] : 120))),
             'work_value' => max(0, min(10, (float) (isset($p['work_value']) ? $p['work_value'] : 1))),
@@ -239,6 +486,7 @@ class TGS_CC_Service
             'updated_at' => current_time('mysql'),
         );
 
+        $old = $id ? self::shift($id) : null;
         if ($id) {
             $wpdb->update($t, $data, array('shift_id' => $id));
         } else {
@@ -246,10 +494,26 @@ class TGS_CC_Service
             $wpdb->insert($t, $data);
             $id = (int) $wpdb->insert_id;
         }
-        return self::shift($id) ?: self::shift_public(array_merge($data, array('shift_id' => $id)));
+        unset(self::$shift_cache[$id]);
+        $new = self::shift($id) ?: self::shift_public(array_merge($data, array('shift_id' => $id)));
+
+        // Chỉ những thay đổi ảnh hưởng cách tính công mới cần tính lại
+        $new['_recalc'] = false;
+        if ($old) {
+            foreach (array('start', 'end', 'break_minutes', 'work_value', 'checkout_after') as $k) {
+                if ((string) $old[$k] !== (string) $new[$k]) {
+                    $new['_recalc'] = true;
+                    break;
+                }
+            }
+        }
+        return $new;
     }
 
-    /** Ca đã có dữ liệu chấm công thì không xoá được, chỉ chuyển sang Ngừng hoạt động */
+    /**
+     * Ca đã có dữ liệu chấm công — hoặc có lịch trong tháng đã chốt — thì không
+     * xoá được, chỉ chuyển sang Ngừng hoạt động.
+     */
     public static function shift_delete($id)
     {
         global $wpdb;
@@ -257,10 +521,20 @@ class TGS_CC_Service
         if ($id <= 0 || !self::shift($id)) {
             return array('deleted' => false, 'message' => 'Không tìm thấy ca cần xoá.');
         }
-        $used =(int) $wpdb->get_var($wpdb->prepare('SELECT COUNT(*) FROM ' . TGS_CC_DB::t('records') . ' WHERE shift_id = %d', $id));
-        if ($used > 0) {
+        $deactivate = function ($why) use ($wpdb, $id) {
             $wpdb->update(TGS_CC_DB::t('shifts'), array('status' => 0, 'updated_at' => current_time('mysql')), array('shift_id' => $id));
-            return array('deleted' => false, 'message' => 'Ca đã có ' . $used . ' lượt chấm công nên không xoá được — đã chuyển sang Ngừng hoạt động.');
+            unset(self::$shift_cache[$id]);
+            return array('deleted' => false, 'message' => $why . ' nên không xoá được — đã chuyển sang Ngừng hoạt động.');
+        };
+        $used = (int) $wpdb->get_var($wpdb->prepare('SELECT COUNT(*) FROM ' . TGS_CC_DB::t('records') . ' WHERE shift_id = %d', $id));
+        if ($used > 0) {
+            return $deactivate('Ca đã có ' . $used . ' lượt chấm công');
+        }
+        $months = $wpdb->get_col($wpdb->prepare("SELECT DISTINCT DATE_FORMAT(work_date, '%%Y-%%m') FROM " . TGS_CC_DB::t('schedules') . ' WHERE shift_id = %d', $id));
+        foreach ((array) $months as $m) {
+            if (self::is_locked($m . '-01')) {
+                return $deactivate('Ca có lịch làm việc trong tháng đã chốt bảng công');
+            }
         }
         $wpdb->delete(TGS_CC_DB::t('schedules'), array('shift_id' => $id));
         $wpdb->delete(TGS_CC_DB::t('shifts'), array('shift_id' => $id));
@@ -291,6 +565,7 @@ class TGS_CC_Service
             've_som'          => array('Về sớm', 'warning'),
             'muon_som'        => array('Đi muộn, về sớm', 'warning'),
             'dang_lam'        => array('Đang làm', 'info'),
+            'chua_vao'        => array('Chưa vào ca', 'warning'),
             'thieu'           => array('Chấm công thiếu', 'danger'),
             'nghi_co_phep'    => array('Nghỉ có phép', 'primary'),
             'nghi_khong_phep' => array('Nghỉ không phép', 'danger'),
@@ -351,8 +626,12 @@ class TGS_CC_Service
         $eff_in = max($in, $w['start']);
         $eff_out = min($outt, $w['end']);
         $span = max(0, (int) floor(($eff_out - $eff_in) / 60));
-        // Chỉ trừ nghỉ giữa ca khi khoảng làm đủ dài để có nghỉ
-        $worked = $span > $shift['break_minutes'] ? $span - $shift['break_minutes'] : $span;
+        // Nghỉ giữa ca: có mặt cả ca → trừ đủ; có mặt một phần → trừ theo tỷ lệ thời gian có mặt.
+        // (Trước đây làm ít hơn thời gian nghỉ thì không trừ gì → giờ làm bị thổi phồng.)
+        $len = max(1, (int) floor(($w['end'] - $w['start']) / 60));
+        $break = (int) $shift['break_minutes'];
+        $deduct = $span >= $len ? $break : (int) round($break * $span / $len);
+        $worked = max(0, $span - $deduct);
         $out['worked_minutes'] = $worked;
 
         if (!empty($s['overtime_enabled'])) {
@@ -424,15 +703,43 @@ class TGS_CC_Service
         return array_merge($rec, $calc);
     }
 
-    /** Tính lại toàn bộ dòng chấm công từ ngày $from (dùng sau khi đổi cài đặt / sửa ca) */
-    public static function recompute_from($from)
+    /**
+     * Tính lại các dòng chấm công từ ngày $from (sau khi đổi cài đặt / sửa ca).
+     * $shift_id > 0: chỉ các dòng của ca đó. Bỏ qua tháng đã chốt.
+     * Đọc một lần, chỉ ghi lại dòng nào thực sự đổi → shop lớn không bị timeout.
+     * Trả về số dòng đã thay đổi.
+     */
+    public static function recompute_from($from, $shift_id = 0)
     {
         global $wpdb;
-        $ids = $wpdb->get_col($wpdb->prepare('SELECT record_id FROM ' . TGS_CC_DB::t('records') . ' WHERE work_date >= %s', $from));
-        foreach ($ids as $id) {
-            self::recompute($id);
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(300);
         }
-        return count($ids);
+        $sql = $wpdb->prepare('SELECT * FROM ' . TGS_CC_DB::t('records') . ' WHERE work_date >= %s', $from);
+        if ($shift_id) {
+            $sql .= $wpdb->prepare(' AND shift_id = %d', $shift_id);
+        }
+        $now = time();
+        $changed = 0;
+        $fields = array('late_minutes', 'early_minutes', 'overtime_minutes', 'worked_minutes', 'work_value', 'status');
+        foreach ((array) $wpdb->get_results($sql, ARRAY_A) as $r) {
+            if (self::is_locked($r['work_date'])) {
+                continue;
+            }
+            $calc = self::compute($r, self::shift($r['shift_id']), $now);
+            $diff = false;
+            foreach ($fields as $f) {
+                if ($f === 'work_value' ? abs((float) $r[$f] - (float) $calc[$f]) > 0.001 : (string) $r[$f] !== (string) $calc[$f]) {
+                    $diff = true;
+                    break;
+                }
+            }
+            if ($diff) {
+                $wpdb->update(TGS_CC_DB::t('records'), $calc, array('record_id' => (int) $r['record_id']));
+                $changed++;
+            }
+        }
+        return $changed;
     }
 
     public static function log($record_id, $user_id, $action, $detail = array())
@@ -551,6 +858,12 @@ class TGS_CC_Service
         if (!$uid || !$shift || !self::valid_date($date)) {
             return new WP_Error('invalid', 'Thiếu nhân viên, ca hoặc ngày.');
         }
+        if (!self::is_shop_user($uid)) {
+            return new WP_Error('not_member', 'Tài khoản này không thuộc cửa hàng nên không tạo được công.');
+        }
+        if (self::is_locked($date)) {
+            return self::lock_error($date);
+        }
         $mode = isset($p['mode']) ? $p['mode'] : 'work';
         $note = substr(sanitize_text_field(isset($p['note']) ? $p['note'] : ''), 0, 255);
 
@@ -612,6 +925,9 @@ class TGS_CC_Service
         if (!$rec) {
             return new WP_Error('not_found', 'Không tìm thấy dòng chấm công.');
         }
+        if (self::is_locked($rec['work_date'])) {
+            return self::lock_error($rec['work_date']);
+        }
         $wpdb->delete(TGS_CC_DB::t('records'), array('record_id' => (int) $record_id));
         self::log($record_id, $rec['user_id'], 'admin_delete', array('vao' => $rec['check_in_at'], 'ra' => $rec['check_out_at'], 'nghi' => $rec['leave_type']));
         return true;
@@ -634,7 +950,7 @@ class TGS_CC_Service
         $count = 0;
         foreach ($sched as $s) {
             $shift = self::shift($s['shift_id']);
-            if (!$shift) {
+            if (!$shift || self::is_locked($s['work_date'])) {
                 continue;
             }
             $w = self::window($shift, $s['work_date']);
@@ -683,6 +999,12 @@ class TGS_CC_Service
         global $wpdb;
         $t = TGS_CC_DB::t('schedules');
         $user_id = (int) $user_id;
+        if (!in_array($user_id, self::employee_ids(), true)) {
+            return new WP_Error('not_employee', 'Tài khoản này không thuộc danh sách nhân viên chấm công của cửa hàng.');
+        }
+        if (self::is_locked($work_date)) {
+            return self::lock_error($work_date);
+        }
         $shift_ids = array_values(array_unique(array_filter(array_map('intval', (array) $shift_ids))));
         $current = $wpdb->get_col($wpdb->prepare("SELECT shift_id FROM {$t} WHERE user_id = %d AND work_date = %s", $user_id, $work_date));
         $current = array_map('intval', $current);
@@ -728,6 +1050,10 @@ class TGS_CC_Service
         if (count($days) > 93) {
             return new WP_Error('invalid', 'Mỗi lần xếp tối đa 93 ngày.');
         }
+        $locked = self::locked_between($from, $to);
+        if ($locked) {
+            return self::lock_error($locked[0] . '-01');
+        }
         if ($replace) {
             $wpdb->query($wpdb->prepare(
                 'DELETE FROM ' . TGS_CC_DB::t('schedules') . ' WHERE work_date BETWEEN %s AND %s AND user_id IN (' . implode(',', $user_ids) . ')',
@@ -749,16 +1075,27 @@ class TGS_CC_Service
         return $n;
     }
 
-    /** Chép lịch của tuần nguồn sang tuần đích (7 ngày bắt đầu từ thứ Hai) */
+    /**
+     * Chép lịch của tuần nguồn sang tuần đích (7 ngày bắt đầu từ thứ Hai).
+     * Tuần nguồn trống → báo lỗi, KHÔNG xoá tuần đích (trước đây bấm nhầm là mất trắng lịch).
+     */
     public static function schedule_copy_week($src_monday, $dst_monday, $user_ids = array(), $replace = true)
     {
         global $wpdb;
         $ids = self::employee_ids($user_ids);
         if (!$ids) {
-            return 0;
+            return new WP_Error('invalid', 'Không có nhân viên nào để chép lịch.');
         }
         $src_end = wp_date('Y-m-d', self::ts($src_monday . ' 12:00:00') + 6 * DAY_IN_SECONDS);
         $dst_end = wp_date('Y-m-d', self::ts($dst_monday . ' 12:00:00') + 6 * DAY_IN_SECONDS);
+        $locked = self::locked_between($dst_monday, $dst_end);
+        if ($locked) {
+            return self::lock_error($locked[0] . '-01');
+        }
+        $src = self::schedules_between($src_monday, $src_end, $ids);
+        if (!$src) {
+            return new WP_Error('empty', 'Tuần ' . mysql2date('d/m', $src_monday) . ' – ' . mysql2date('d/m/Y', $src_end) . ' chưa có lịch nào để chép. Lịch tuần đang xem được giữ nguyên.');
+        }
         if ($replace) {
             $wpdb->query($wpdb->prepare(
                 'DELETE FROM ' . TGS_CC_DB::t('schedules') . ' WHERE work_date BETWEEN %s AND %s AND user_id IN (' . implode(',', $ids) . ')',
@@ -768,7 +1105,7 @@ class TGS_CC_Service
         }
         $offset = (int) round((self::ts($dst_monday . ' 12:00:00') - self::ts($src_monday . ' 12:00:00')) / DAY_IN_SECONDS);
         $n = 0;
-        foreach (self::schedules_between($src_monday, $src_end, $ids) as $s) {
+        foreach ($src as $s) {
             $d = wp_date('Y-m-d', self::ts($s['work_date'] . ' 12:00:00') + $offset * DAY_IN_SECONDS);
             $n += (int) self::schedule_insert($s['user_id'], $s['shift_id'], $d);
         }
@@ -781,6 +1118,10 @@ class TGS_CC_Service
         $ids = self::employee_ids($user_ids);
         if (!$ids) {
             return 0;
+        }
+        $locked = self::locked_between($from, $to);
+        if ($locked) {
+            return self::lock_error($locked[0] . '-01');
         }
         return (int) $wpdb->query($wpdb->prepare(
             'DELETE FROM ' . TGS_CC_DB::t('schedules') . ' WHERE work_date BETWEEN %s AND %s AND user_id IN (' . implode(',', $ids) . ')',
@@ -842,10 +1183,12 @@ class TGS_CC_Service
                 if ($e['record']) {
                     $st = $e['record']['status'];
                 } else {
+                    // Có lịch, chưa chấm: chưa tới giờ → "Chưa tới ca"; ca đang diễn ra → "Chưa vào ca"
+                    // (vẫn chấm vào được, chưa phải vắng); hết ca rồi mới là "Chưa chấm công" (vắng).
                     $st = 'chua_cham';
                     if (isset($shifts[$sid])) {
                         $w = self::window($shifts[$sid], $date);
-                        $st = $now >= $w['start'] ? 'chua_cham' : 'lich';
+                        $st = $now < $w['start'] ? 'lich' : ($now < $w['end'] ? 'chua_vao' : 'chua_cham');
                     }
                 }
                 $cells[$k][$sid]['status'] = $st;
@@ -869,6 +1212,7 @@ class TGS_CC_Service
             'employees' => $employees,
             'shifts' => array_values($shifts),
             'cells' => (object) $cells,
+            'locked' => self::locked_between($from, $to),
         );
     }
 
@@ -1002,8 +1346,8 @@ class TGS_CC_Service
                     continue;
                 }
                 foreach ($cells[$k] as $e) {
-                    if ($e['status'] === 'lich') {
-                        continue; // ca chưa tới: không đưa vào báo cáo
+                    if ($e['status'] === 'lich' || $e['status'] === 'chua_vao') {
+                        continue; // ca chưa tới / đang diễn ra mà chưa chấm: chưa có gì để báo cáo
                     }
                     $s = isset($shifts[$e['shift_id']]) ? $shifts[$e['shift_id']] : null;
                     $r = $e['record'];
@@ -1096,7 +1440,7 @@ class TGS_CC_Service
                 } elseif (!empty($flags['dang_lam'])) {
                     $sym = 'Đ';
                     $tone = 'info';
-                } elseif (!empty($flags['lich'])) {
+                } elseif (!empty($flags['lich']) || !empty($flags['chua_vao'])) {
                     $sym = '';
                     $tone = 'plan';
                 }
@@ -1119,6 +1463,9 @@ class TGS_CC_Service
             'shop_name' => get_bloginfo('name'),
             'report_title' => $s['report_title'],
             'signers' => array_values(array_filter(array_map('trim', preg_split('/\r?\n/', (string) $s['signers'])))),
+            'lock' => self::lock_info($month),
+            'can_lock' => self::can_lock_month($month),
+            'can_unlock' => self::can_unlock(),
         );
     }
 
@@ -1277,6 +1624,22 @@ class TGS_CC_Service
     public static function punch($user_id, $type, $args, $source = 'pos')
     {
         global $wpdb;
+        // Khoá theo nhân viên: bấm cùng lúc từ 2 máy thì lượt sau phải chờ lượt trước xong
+        // rồi mới đọc lại trạng thái → không thể mở 2 ca một lúc.
+        $lock = 'tgs_cc_punch_' . get_current_blog_id() . '_' . (int) $user_id;
+        if (!(int) $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 5)', $lock))) {
+            return new WP_Error('busy', 'Đang xử lý một lượt chấm công khác của bạn, thử lại sau vài giây.');
+        }
+        try {
+            return self::punch_locked($user_id, $type, $args, $source);
+        } finally {
+            $wpdb->query($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock));
+        }
+    }
+
+    private static function punch_locked($user_id, $type, $args, $source)
+    {
+        global $wpdb;
         $state = self::pos_state($user_id);
         $now_mysql = current_time('mysql');
         $ip = self::client_ip();
@@ -1297,6 +1660,9 @@ class TGS_CC_Service
             }
             if (!$ok) {
                 return new WP_Error('invalid', 'Ca này không còn trong khung giờ được chấm vào. Tải lại và thử lại.');
+            }
+            if (self::is_locked($date)) {
+                return self::lock_error($date);
             }
             $inserted = $wpdb->insert($t, array(
                 'user_id' => (int) $user_id,
@@ -1329,6 +1695,9 @@ class TGS_CC_Service
             }
             $rid = (int) $state['open']['record_id'];
             $rec = self::record($rid);
+            if (self::is_locked($rec['work_date'])) {
+                return self::lock_error($rec['work_date']);
+            }
             if (time() - self::ts($rec['check_in_at']) < 60) {
                 return new WP_Error('too_fast', 'Bạn vừa chấm vào chưa đầy 1 phút.');
             }
